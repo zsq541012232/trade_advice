@@ -14,6 +14,7 @@ jobs:
       AIHUBMIX_BASE_URL: ${{ vars.AIHUBMIX_BASE_URL }}
       AIHUBMIX_MODEL: ${{ vars.AIHUBMIX_MODEL }}
       STOCK_CODES: ${{ vars.STOCK_CODES }}
+      EMAIL_STOCK_ROUTER: ${{ vars.EMAIL_STOCK_ROUTER }}
       DUCKDUCKGO_MAX_RESULTS: ${{ vars.DUCKDUCKGO_MAX_RESULTS }}
       DUCKDUCKGO_REGION: ${{ vars.DUCKDUCKGO_REGION }}
     steps:
@@ -34,8 +35,8 @@ jobs:
             echo "Missing secret AIHUBMIX_API_KEY" >&2
             exit 1
           fi
-          if [ -z "$STOCK_CODES" ]; then
-            echo "Missing repo variable STOCK_CODES" >&2
+          if [ -z "$STOCK_CODES" ] && [ -z "$EMAIL_STOCK_ROUTER" ]; then
+            echo "Missing repo variable STOCK_CODES (or EMAIL_STOCK_ROUTER)" >&2
             exit 1
           fi
 
