@@ -71,6 +71,7 @@ class Config:
 @dataclass
 class StockResearchResult:
     stock_code: str
+    stock_name: str | None
     contexts: List[dict]
     advice: str
     brief_summary: str
@@ -612,8 +613,10 @@ def run() -> None:
     for index, code in enumerate(config.stock_codes, start=1):
         realtime_print(f"\n========== {code} ({index}/{total}) ==========")
         market_snapshot = fetch_market_snapshot(code, config)
+        stock_name = detect_stock_name(code, market_snapshot)
+        stock_label = format_stock_label(code, stock_name)
         if market_snapshot:
-            realtime_print(f"[进度] {code}: 行情源={market_snapshot.get('provider')} 时间={market_snapshot.get('timestamp')}")
+            realtime_print(f"[进度] {stock_label}: 行情源={market_snapshot.get('provider')} 时间={market_snapshot.get('timestamp')}")
         if config.chain_of_search_depth > 1:
             contexts = search_context_chain(code, config.max_search_results, config.search_region, config.chain_of_search_depth)
         else:
@@ -622,17 +625,18 @@ def run() -> None:
             contexts.insert(0, {
                 "query": f"{code} 实时行情技术指标",
                 "region": "direct-api",
-                "title": f"{code} 最新价格与技术指标（{market_snapshot.get('provider')}）",
+                "title": f"{stock_label} 最新价格与技术指标（{market_snapshot.get('provider')}）",
                 "href": market_snapshot.get("source_url", ""),
                 "body": format_market_snapshot(market_snapshot),
                 "published_at": market_snapshot.get("date", "unknown"),
             })
-        realtime_print(f"[进度] {code}: 开始请求 AI 生成建议")
+        realtime_print(f"[进度] {stock_label}: 开始请求 AI 生成建议")
         advice = request_ai_advice(config, code, contexts)
-        realtime_print(f"[进度] {code}: AI 建议生成完成")
+        realtime_print(f"[进度] {stock_label}: AI 建议生成完成")
         realtime_print(advice)
         research_cache[code] = StockResearchResult(
             stock_code=code,
+            stock_name=stock_name,
             contexts=contexts,
             advice=advice,
             brief_summary=build_brief_summary(code, advice),
@@ -794,32 +798,33 @@ def build_email_message(
         advice = research.advice
         safe_advice = markdown_to_html(advice)
         summary = research.brief_summary
+        stock_label = format_stock_label(code, research.stock_name)
         quick_summary_items.append(
             "<li style='margin:6px 0;line-height:1.55;'>"
-            f"<strong>{code}</strong>：{html.escape(summary)}"
+            f"<strong>{html.escape(stock_label)}</strong>：{html.escape(summary)}"
             "</li>"
         )
         html_sections.append(
             "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
-            f"<h3 style='margin:0 0 8px 0;color:#111827;'>{code}</h3>"
+            f"<h3 style='margin:0 0 8px 0;color:#111827;'>{html.escape(stock_label)}</h3>"
             f"<div style='line-height:1.65;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
             "</section>"
         )
-        plain_lines.extend([f"- {code}：{summary}", ""])
+        plain_lines.extend([f"- {stock_label}：{summary}", ""])
 
     for code in stocks:
         research = research_by_stock.get(code)
         if not research:
             continue
-        plain_lines.extend([f"## {code}", research.advice, ""])
+        plain_lines.extend([f"## {format_stock_label(code, research.stock_name)}", research.advice, ""])
 
     if not html_sections:
         return None
 
     summary_rows = "".join(
         "<tr>"
-        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{code}</td>"
-        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, [], '', '信息不足')).contexts)}</td>"
+        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{html.escape(format_stock_label(code, research_by_stock[code].stock_name))}</td>"
+        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, None, [], '', '信息不足')).contexts)}</td>"
         "<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>🧠 AI 已生成</td>"
         "</tr>"
         for code in stocks
@@ -874,10 +879,50 @@ def extract_html_body(message: MIMEMultipart) -> str:
 def build_result_dict(research: StockResearchResult) -> dict:
     return {
         "stock_code": research.stock_code,
+        "stock_name": research.stock_name,
         "search_context_count": len(research.contexts),
         "brief_summary": research.brief_summary,
         "advice": research.advice,
     }
+
+
+def format_stock_label(stock_code: str, stock_name: str | None) -> str:
+    name = (stock_name or "").strip()
+    if name:
+        return f"{stock_code}（{name}）"
+    return stock_code
+
+
+def detect_stock_name(stock_code: str, market_snapshot: dict | None) -> str | None:
+    if market_snapshot:
+        for key in ("stock_name", "name", "short_name"):
+            value = market_snapshot.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return fetch_cn_stock_name(stock_code)
+
+
+def fetch_cn_stock_name(stock_code: str) -> str | None:
+    if not stock_code.isdigit() or len(stock_code) != 6:
+        return None
+    try:
+        import requests
+
+        secid, symbol = to_eastmoney_secid(stock_code)
+        exchange = "sh" if secid.startswith("1.") else "sz"
+        url = f"https://hq.sinajs.cn/list={exchange}{symbol}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        parts = response.text.split('"')
+        if len(parts) < 2:
+            return None
+        values = parts[1].split(",")
+        if not values:
+            return None
+        name = values[0].strip()
+        return name or None
+    except Exception:
+        return None
 
 
 def build_brief_summary(stock_code: str, advice: str) -> str:
@@ -1094,6 +1139,7 @@ def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
     return {
         "provider": "yahoo",
         "symbol": symbol,
+        "stock_name": quote.get("shortName") or quote.get("longName"),
         "price": selected_price or quote.get("regularMarketPrice"),
         "change_percent": quote.get("regularMarketChangePercent"),
         "timestamp": selected_timestamp or quote.get("regularMarketTime"),
@@ -1212,6 +1258,7 @@ def fetch_market_snapshot_from_sina(stock_code: str) -> dict | None:
     return {
         "provider": "sina",
         "symbol": symbol,
+        "stock_name": values[0].strip() if values else None,
         "price": price,
         "change_percent": change_percent,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1243,6 +1290,7 @@ def fetch_market_snapshot_from_tencent(stock_code: str) -> dict | None:
     return {
         "provider": "tencent",
         "symbol": symbol,
+        "stock_name": parts[1].strip() if len(parts) > 1 else None,
         "price": price,
         "change_percent": change_percent,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1361,6 +1409,7 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
     return {
         "provider": "eastmoney",
         "symbol": symbol,
+        "stock_name": data.get("f58"),
         "price": price,
         "change_percent": change_percent,
         "timestamp": datetime.now(timezone.utc).isoformat(),

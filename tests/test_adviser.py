@@ -380,6 +380,7 @@ def test_nearest_open_trade_date_uses_cache(monkeypatch):
 def test_build_result_dict_uses_cached_research_result():
     research = adviser.StockResearchResult(
         stock_code="AAPL",
+        stock_name=None,
         contexts=[{"title": "t1"}, {"title": "t2"}],
         advice="建议内容",
         brief_summary="观点=中性；置信度=66/100",
@@ -389,6 +390,7 @@ def test_build_result_dict_uses_cached_research_result():
 
     assert result == {
         "stock_code": "AAPL",
+        "stock_name": None,
         "search_context_count": 2,
         "brief_summary": "观点=中性；置信度=66/100",
         "advice": "建议内容",
@@ -422,6 +424,7 @@ def test_build_email_message_lists_summary_before_details():
     )
     research = adviser.StockResearchResult(
         stock_code="AAPL",
+        stock_name="苹果",
         contexts=[{"title": "t1"}],
         advice="# AAPL 投研结论\n详细分析正文",
         brief_summary="观点=中性；置信度=70/100",
@@ -431,4 +434,5 @@ def test_build_email_message_lists_summary_before_details():
 
     html_body = adviser.extract_html_body(message)
     assert "快速摘要" in html_body
+    assert "AAPL（苹果）" in html_body
     assert html_body.index("观点=中性；置信度=70/100") < html_body.index("详细分析正文")
