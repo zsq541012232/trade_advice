@@ -93,9 +93,10 @@ python adviser.py --pretty-json
 - `Settings -> Secrets and variables -> Actions -> Secrets`
   - `AIHUBMIX_API_KEY`
 - `Settings -> Secrets and variables -> Actions -> Variables`
-  - `STOCK_CODES`
+  - `STOCK_CODES`（或改用 `EMAIL_STOCK_ROUTER`）
   - （可选）`AIHUBMIX_BASE_URL`
   - （可选）`AIHUBMIX_MODEL`
+  - （可选）`EMAIL_STOCK_ROUTER`
   - （可选）`DUCKDUCKGO_MAX_RESULTS`
   - （可选）`DUCKDUCKGO_REGION`
 
