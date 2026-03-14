@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import builtins
-from contextlib import contextmanager
+from contextlib import nullcontext
 import sys
 import html
 import json
@@ -18,7 +16,7 @@ import re
 import smtplib
 import time
 import textwrap
-from urllib.parse import quote_plus, unquote, urlparse
+from urllib.parse import quote_plus, urlparse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -26,9 +24,29 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from typing import Iterable, List
+from zoneinfo import ZoneInfo
 
 
 _TRADE_DATE_CACHE: dict[str, object] = {"date": None, "value": None}
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def now_shanghai() -> datetime:
+    return datetime.now(SHANGHAI_TZ)
+
+
+def request_with_retry(request_callable, *args, retries: int = 3, backoff_seconds: float = 1.0, **kwargs):
+    import requests
+
+    for attempt in range(1, retries + 1):
+        try:
+            return request_callable(*args, **kwargs)
+        except requests.Timeout:
+            if attempt == retries:
+                raise
+            time.sleep(backoff_seconds * (2 ** (attempt - 1)))
+        except requests.RequestException:
+            raise
 
 
 
@@ -431,7 +449,7 @@ def search_context_via_rss(stock_code: str, queries: list[str], max_results: int
             for source_name, template in endpoints:
                 url = template.format(query=quote_plus(query))
                 try:
-                    resp = requests.get(url, timeout=20)
+                    resp = request_with_retry(requests.get, url, timeout=20)
                     resp.raise_for_status()
                     items = parse_rss_items(resp.text)
                 except Exception as exc:
@@ -464,191 +482,10 @@ def parse_bool_env(raw: str | None, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-@contextmanager
 def temporary_search_proxy_env(stock_code: str):
-    """按需仅在检索阶段启用代理，避免影响本地其它网络调用。"""
-    if not parse_bool_env(os.getenv("SEARCH_USE_VPN"), default=False):
-        yield
-        return
-
-    subscription_url = os.getenv("CLASH_SUBSCRIPTION_URL", "").strip()
-    if not subscription_url:
-        realtime_print(f"[进度] {stock_code}: SEARCH_USE_VPN=true 但未配置 CLASH_SUBSCRIPTION_URL，跳过代理")
-        yield
-        return
-
-    proxy_url = os.getenv("CLASH_PROXY_URL", "").strip()
-    if not proxy_url:
-        proxy_url = resolve_proxy_url_from_subscription(subscription_url)
-    if not proxy_url:
-        proxy_url = "http://127.0.0.1:7890"
-        realtime_print(f"[进度] {stock_code}: 订阅解析失败，回退默认 Clash 端口 -> {proxy_url}")
-    if not proxy_url:
-        realtime_print(f"[进度] {stock_code}: 无法从订阅中解析可用 HTTP/SOCKS 代理，跳过代理")
-        yield
-        return
-
-    backup = {k: os.environ.get(k) for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]}
-
-    os.environ["HTTP_PROXY"] = proxy_url
-    os.environ["HTTPS_PROXY"] = proxy_url
-    os.environ["ALL_PROXY"] = proxy_url
-    realtime_print(f"[进度] {stock_code}: 检索阶段已开启 Clash 代理 -> {proxy_url}")
-    try:
-        yield
-    finally:
-        for key, value in backup.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
-def resolve_proxy_url_from_subscription(subscription_url: str) -> str | None:
-    """从 Clash 订阅链接提取首个可直接用于 requests 的代理 URL。"""
-    import requests
-
-    headers = {
-        "User-Agent": "ClashForWindows/0.20.39",
-        "Accept": "*/*",
-    }
-    try:
-        response = requests.get(subscription_url, headers=headers, timeout=20)
-        response.raise_for_status()
-    except Exception:
-        return None
-
-    content = (response.text or "").strip()
-    if not content:
-        return None
-
-    proxy_url = extract_proxy_url_from_yaml(content)
-    if proxy_url:
-        return proxy_url
-
-    decoded = decode_base64_subscription(content)
-    if not decoded:
-        return None
-    return extract_proxy_url_from_lines(decoded)
-
-
-def extract_proxy_url_from_yaml(content: str) -> str | None:
-    proxy_url = extract_proxy_url_from_yaml_text(content)
-    if proxy_url:
-        return proxy_url
-
-    try:
-        import yaml
-
-        config = yaml.safe_load(content)
-    except Exception:
-        return None
-
-    if not isinstance(config, dict):
-        return None
-
-    proxies = config.get("proxies")
-    if not isinstance(proxies, list):
-        return None
-
-    for proxy in proxies:
-        proxy_url = convert_clash_proxy_to_url(proxy)
-        if proxy_url:
-            return proxy_url
-    return None
-
-
-def extract_proxy_url_from_yaml_text(content: str) -> str | None:
-    """无 PyYAML 时的轻量兜底：按缩进解析 proxies 列表里的 type/server/port。"""
-    current: dict[str, str] = {}
-    in_proxies = False
-    for raw in content.splitlines():
-        line = raw.rstrip()
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-
-        if stripped == "proxies:":
-            in_proxies = True
-            continue
-        if not in_proxies:
-            continue
-
-        if stripped.startswith("- "):
-            proxy_url = convert_clash_proxy_to_url(current)
-            if proxy_url:
-                return proxy_url
-            current = {}
-            maybe_kv = stripped[2:].strip()
-            if ":" in maybe_kv:
-                key, value = maybe_kv.split(":", 1)
-                current[key.strip()] = value.strip().strip("'\"")
-            continue
-
-        if ":" in stripped and not stripped.startswith("-"):
-            key, value = stripped.split(":", 1)
-            current[key.strip()] = value.strip().strip("'\"")
-
-    return convert_clash_proxy_to_url(current)
-
-
-def convert_clash_proxy_to_url(proxy: object) -> str | None:
-    if not isinstance(proxy, dict):
-        return None
-
-    server = str(proxy.get("server", "")).strip()
-    port = proxy.get("port")
-    if not server or not port:
-        return None
-
-    proxy_type = str(proxy.get("type", "")).strip().lower()
-    username = str(proxy.get("username", "")).strip()
-    password = str(proxy.get("password", "")).strip()
-    auth = ""
-    if username:
-        auth = f"{username}:{password}@"
-
-    if proxy_type in {"http", "https"}:
-        return f"http://{auth}{server}:{port}"
-    if proxy_type in {"socks5", "socks5h"}:
-        return f"socks5://{auth}{server}:{port}"
-    return None
-
-
-def decode_base64_subscription(content: str) -> str | None:
-    cleaned = "".join(content.split())
-    if not cleaned:
-        return None
-
-    padded = cleaned + "=" * (-len(cleaned) % 4)
-    try:
-        decoded = base64.b64decode(padded, validate=False).decode("utf-8", errors="ignore")
-    except (binascii.Error, ValueError):
-        return None
-
-    decoded = decoded.strip()
-    return decoded or None
-
-
-def extract_proxy_url_from_lines(decoded: str) -> str | None:
-    for raw_line in decoded.splitlines():
-        line = unquote(raw_line.strip())
-        if not line:
-            continue
-        parsed = urlparse(line)
-        if parsed.scheme in {"http", "https", "socks5", "socks5h"} and parsed.hostname and parsed.port:
-            if parsed.scheme in {"http", "https"}:
-                scheme = "http"
-            elif parsed.scheme == "socks5h":
-                scheme = "socks5"
-            else:
-                scheme = parsed.scheme
-
-            auth = ""
-            if parsed.username:
-                auth = f"{parsed.username}:{parsed.password or ''}@"
-            return f"{scheme}://{auth}{parsed.hostname}:{parsed.port}"
-    return None
+    """已移除 VPN/Clash 代理逻辑，保留上下文管理器兼容旧调用。"""
+    _ = stock_code
+    return nullcontext()
 
 
 def parse_rss_items(xml_text: str) -> list[dict]:
@@ -737,7 +574,7 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
         ],
     }
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp = request_with_retry(requests.post, url, headers=headers, json=payload, timeout=120)
     try:
         resp.raise_for_status()
     except requests.HTTPError as exc:
@@ -765,7 +602,7 @@ def resolve_model(config: Config, requests_module) -> str:
     headers = {"Authorization": f"Bearer {config.aihubmix_api_key}"}
 
     try:
-        resp = requests_module.get(url, headers=headers, timeout=30)
+        resp = request_with_retry(requests_module.get, url, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception:
@@ -900,7 +737,7 @@ def parse_datetime(raw_value: str | None) -> datetime | None:
 
 
 def within_last_3_months(dt: datetime) -> bool:
-    now = datetime.now(timezone.utc)
+    now = now_shanghai()
     cutoff = now - timedelta(days=92)
     return dt >= cutoff
 
@@ -951,7 +788,8 @@ def send_group_emails_via_exchange(config: Config, research_by_stock: dict[str, 
         raise ValueError("EMAIL_DELIVERY_PROTOCOL=exchange 时，需配置 EXCHANGE_TENANT_ID/EXCHANGE_CLIENT_ID/EXCHANGE_CLIENT_SECRET/EXCHANGE_SENDER_UPN")
 
     token_url = f"https://login.microsoftonline.com/{config.exchange_tenant_id}/oauth2/v2.0/token"
-    token_resp = requests.post(
+    token_resp = request_with_retry(
+        requests.post,
         token_url,
         data={
             "client_id": config.exchange_client_id,
@@ -980,7 +818,7 @@ def send_group_emails_via_exchange(config: Config, research_by_stock: dict[str, 
             },
             "saveToSentItems": True,
         }
-        resp = requests.post(graph_url, headers=headers, json=payload, timeout=30)
+        resp = request_with_retry(requests.post, graph_url, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
         realtime_print(f"[进度] Exchange 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
 
@@ -1040,7 +878,7 @@ def build_email_message(
         "<div style='max-width:900px;margin:0 auto;background:#ffffff;border:1px solid #dbe2ea;border-radius:14px;overflow:hidden;'>"
         "<div style='padding:18px 20px;background:linear-gradient(120deg,#0f172a,#1d4ed8);color:#ffffff;'>"
         "<h2 style='margin:0 0 6px 0;font-size:22px;'>📈 股票分析日报</h2>"
-        f"<p style='margin:0;font-size:13px;opacity:0.9;'>⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 {html.escape(receiver)}</p>"
+        f"<p style='margin:0;font-size:13px;opacity:0.9;'>⏰ {now_shanghai().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 {html.escape(receiver)}</p>"
         "</div>"
         "<div style='padding:16px 18px 6px 18px;'>"
         "<table style='width:100%;border-collapse:collapse;margin:0 0 14px 0;font-size:13px;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;'>"
@@ -1117,7 +955,7 @@ def fetch_cn_stock_name(stock_code: str) -> str | None:
         secid, symbol = to_eastmoney_secid(stock_code)
         exchange = "sh" if secid.startswith("1.") else "sz"
         url = f"https://hq.sinajs.cn/list={exchange}{symbol}"
-        response = requests.get(url, timeout=10)
+        response = request_with_retry(requests.get, url, timeout=10)
         response.raise_for_status()
         parts = response.text.split('"')
         if len(parts) < 2:
@@ -1172,7 +1010,7 @@ def request_ai_brief_summary(config: Config, stock_code: str, advice: str) -> st
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp = request_with_retry(requests.post, url, headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"].strip()
@@ -1347,13 +1185,13 @@ def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
     target_trade_date = nearest_open_trade_date()
     quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    quote_resp = requests.get(quote_url, headers=headers, timeout=20)
+    quote_resp = request_with_retry(requests.get, quote_url, headers=headers, timeout=20)
     quote_resp.raise_for_status()
     quote_results = quote_resp.json().get("quoteResponse", {}).get("result", [])
     quote = quote_results[0] if quote_results else {}
 
     chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=6mo&interval=1d"
-    chart_resp = requests.get(chart_url, headers=headers, timeout=20)
+    chart_resp = request_with_retry(requests.get, chart_url, headers=headers, timeout=20)
     chart_resp.raise_for_status()
     chart_result = chart_resp.json().get("chart", {}).get("result", [])
     if not chart_result:
@@ -1489,7 +1327,7 @@ def fetch_market_snapshot_from_sina(stock_code: str) -> dict | None:
     secid, symbol = to_eastmoney_secid(stock_code)
     exchange = "sh" if secid.startswith("1.") else "sz"
     url = f"https://hq.sinajs.cn/list={exchange}{symbol}"
-    resp = requests.get(url, timeout=20)
+    resp = request_with_retry(requests.get, url, timeout=20)
     resp.raise_for_status()
     text = resp.text
     parts = text.split("\"")
@@ -1516,8 +1354,8 @@ def fetch_market_snapshot_from_sina(stock_code: str) -> dict | None:
         "stock_name": values[0].strip() if values else None,
         "price": price,
         "change_percent": change_percent,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "date": datetime.now(timezone.utc).date().isoformat(),
+        "timestamp": now_shanghai().isoformat(),
+        "date": now_shanghai().date().isoformat(),
         "source_url": f"https://finance.sina.com.cn/realstock/company/{exchange}{symbol}/nc.shtml",
         **indicators,
     }
@@ -1529,7 +1367,7 @@ def fetch_market_snapshot_from_tencent(stock_code: str) -> dict | None:
     secid, symbol = to_eastmoney_secid(stock_code)
     exchange = "sh" if secid.startswith("1.") else "sz"
     url = f"https://qt.gtimg.cn/q={exchange}{symbol}"
-    resp = requests.get(url, timeout=20)
+    resp = request_with_retry(requests.get, url, timeout=20)
     resp.raise_for_status()
     parts = resp.text.split("~")
     if len(parts) < 40:
@@ -1548,8 +1386,8 @@ def fetch_market_snapshot_from_tencent(stock_code: str) -> dict | None:
         "stock_name": parts[1].strip() if len(parts) > 1 else None,
         "price": price,
         "change_percent": change_percent,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "date": datetime.now(timezone.utc).date().isoformat(),
+        "timestamp": now_shanghai().isoformat(),
+        "date": now_shanghai().date().isoformat(),
         "source_url": f"https://gu.qq.com/{exchange}{symbol}",
         **indicators,
     }
@@ -1560,7 +1398,7 @@ def fetch_market_snapshot_from_stooq(stock_code: str) -> dict | None:
 
     symbol = to_yahoo_symbol(stock_code).replace(".SS", ".CN").replace(".SZ", ".CN")
     url = f"https://stooq.com/q/d/l/?s={symbol.lower()}&i=d"
-    resp = requests.get(url, timeout=20)
+    resp = request_with_retry(requests.get, url, timeout=20)
     resp.raise_for_status()
     lines = [line.strip() for line in resp.text.splitlines() if line.strip()]
     if len(lines) < 3:
@@ -1595,8 +1433,8 @@ def fetch_market_snapshot_from_stooq(stock_code: str) -> dict | None:
         "symbol": symbol,
         "price": last_close,
         "change_percent": None,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "date": last_date or datetime.now(timezone.utc).date().isoformat(),
+        "timestamp": now_shanghai().isoformat(),
+        "date": last_date or now_shanghai().date().isoformat(),
         "source_url": f"https://stooq.com/q/?s={symbol.lower()}",
         **indicators,
     }
@@ -1611,7 +1449,7 @@ def fetch_recent_bars_from_eastmoney(stock_code: str) -> list[dict]:
         f"secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
         "&klt=101&fqt=1&lmt=180"
     )
-    kline_resp = requests.get(kline_url, timeout=20)
+    kline_resp = request_with_retry(requests.get, kline_url, timeout=20)
     kline_resp.raise_for_status()
     klines = kline_resp.json().get("data", {}).get("klines", [])
 
@@ -1638,7 +1476,7 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
         f"secid={secid}&fields=f43,f44,f45,f46,f47,f48,f49,f57,f58,f60,f169,f170"
     )
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    quote_resp = requests.get(quote_url, headers=headers, timeout=20)
+    quote_resp = request_with_retry(requests.get, quote_url, headers=headers, timeout=20)
     quote_resp.raise_for_status()
     data = quote_resp.json().get("data")
     if not data:
@@ -1649,7 +1487,7 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
         f"secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
         "&klt=101&fqt=1&lmt=180"
     )
-    kline_resp = requests.get(kline_url, timeout=20)
+    kline_resp = request_with_retry(requests.get, kline_url, timeout=20)
     kline_resp.raise_for_status()
     klines = kline_resp.json().get("data", {}).get("klines", [])
 
@@ -1668,8 +1506,8 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
         "stock_name": data.get("f58"),
         "price": price,
         "change_percent": change_percent,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "date": datetime.now(timezone.utc).date().isoformat(),
+        "timestamp": now_shanghai().isoformat(),
+        "date": now_shanghai().date().isoformat(),
         "source_url": f"https://quote.eastmoney.com/{symbol}.html",
         **indicators,
     }
@@ -1989,8 +1827,8 @@ def safe_float(value) -> float | None:
 
 
 def nearest_open_trade_date(now: datetime | None = None) -> datetime.date:
-    current = now or datetime.now(timezone.utc)
-    local_today = (current + timedelta(hours=8)).date()
+    current = now or now_shanghai()
+    local_today = current.astimezone(SHANGHAI_TZ).date()
     # 回退逻辑：周末自动退到最近工作日
     fallback = local_today
     while fallback.weekday() >= 5:
