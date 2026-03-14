@@ -45,8 +45,14 @@ cp .env.example .env
 - `SMTP_SECURITY`（默认 `ssl`，可选 `starttls` / `plain`）
 - `EMAIL_DELIVERY_PROTOCOL`（默认 `smtp`，可配置 `smtp` / `pop3` / `imap` / `exchange` / `carddav`）
 - `CHAIN_OF_SEARCH_DEPTH`（默认 `1`，>1 时启用多轮检索）
+- `SEARCH_USE_VPN`（默认 `false`，开启后仅在检索阶段启用代理）
+- `CLASH_SUBSCRIPTION_URL`（建议放在 Secret 中，用于标记启用 Clash 订阅配置）
+- `CLASH_PROXY_URL`（默认 `http://127.0.0.1:7890`）
 
 > A 股代码建议优先写纯数字（如 `600900`、`000001`）。脚本会自动扩展为 `600900.SH` / `SH600900` 等别名提高检索命中率。
+
+> 检索 query 已加入“海外新闻 / 全球市场 / 利率通胀 / 地缘政治”等宏观维度，避免只看本地舆情。
+> 当 `SEARCH_USE_VPN=true` 且存在 `CLASH_SUBSCRIPTION_URL` 时，脚本仅在检索阶段临时设置 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`，用于获取海外新闻与全球数据。
 
 ## 3. 本地运行
 
@@ -129,6 +135,7 @@ d@example.com:MSFT,NVDA"
   - `AIHUBMIX_API_KEY`
   - `SENDER_EMAIL`（如需发邮件）
   - `SENDER_AUTH_CODE`（如需发邮件）
+  - `CLASH_SUBSCRIPTION_URL`（如需开启 VPN 检索）
 
 - `Settings -> Secrets and variables -> Actions -> Variables`
   - `STOCK_CODES`（或改用 `EMAIL_STOCK_ROUTER`）
@@ -140,6 +147,8 @@ d@example.com:MSFT,NVDA"
   - （可选）`EMAIL_STOCK_ROUTER`
   - （可选）`DUCKDUCKGO_MAX_RESULTS`
   - （可选）`DUCKDUCKGO_REGION`
+  - （可选）`SEARCH_USE_VPN`（`true`/`false`）
+  - （可选）`CLASH_PROXY_URL`（默认 `http://127.0.0.1:7890`）
   - （可选）`SMTP_HOST`
   - （可选）`SMTP_PORT`
 

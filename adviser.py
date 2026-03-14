@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import builtins
+from contextlib import contextmanager
 import sys
 import html
 import json
@@ -234,6 +235,8 @@ def build_queries(stock_code: str, adaptive_topics: list[str] | None = None) -> 
         "{alias} 股票 最新消息",
         "{alias} 财报 业绩 指引",
         "{alias} 股价 分析 技术指标",
+        "{alias} 海外新闻 宏观经济 影响",
+        "{alias} 全球市场 利率 通胀 地缘政治 风险",
     ]
 
     if adaptive_topics:
@@ -353,38 +356,39 @@ def search_context_via_queries(stock_code: str, queries: list[str], max_results:
     results: list[dict] = []
     fallback_regions = list(dict.fromkeys([region or "zh-cn", "zh-cn", "wt-wt"]))
     seen_urls = set()
-    for current_region in fallback_regions:
-        with DDGS() as ddgs:
-            for idx, query in enumerate(queries, start=1):
-                realtime_print(
-                    f"[进度] {stock_code}: 检索 {idx}/{len(queries)} -> {query}"
-                    f"（region={current_region}）"
-                )
-                hits: Iterable[dict] = search_with_retry(ddgs, query, current_region, max_results)
-                query_count = 0
-                for hit in hits:
-                    published_at = parse_published_at(hit)
-                    if not published_at or not within_last_3_months(published_at):
-                        continue
-                    href = hit.get("href", "")
-                    if href and href in seen_urls:
-                        continue
-                    if href:
-                        seen_urls.add(href)
-                    query_count += 1
-                    results.append(
-                        {
-                            "query": query,
-                            "region": current_region,
-                            "title": hit.get("title", ""),
-                            "href": href,
-                            "body": hit.get("body", ""),
-                            "published_at": published_at.date().isoformat(),
-                        }
+    with temporary_search_proxy_env(stock_code):
+        for current_region in fallback_regions:
+            with DDGS() as ddgs:
+                for idx, query in enumerate(queries, start=1):
+                    realtime_print(
+                        f"[进度] {stock_code}: 检索 {idx}/{len(queries)} -> {query}"
+                        f"（region={current_region}）"
                     )
-                realtime_print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
-        if results:
-            break
+                    hits: Iterable[dict] = search_with_retry(ddgs, query, current_region, max_results)
+                    query_count = 0
+                    for hit in hits:
+                        published_at = parse_published_at(hit)
+                        if not published_at or not within_last_3_months(published_at):
+                            continue
+                        href = hit.get("href", "")
+                        if href and href in seen_urls:
+                            continue
+                        if href:
+                            seen_urls.add(href)
+                        query_count += 1
+                        results.append(
+                            {
+                                "query": query,
+                                "region": current_region,
+                                "title": hit.get("title", ""),
+                                "href": href,
+                                "body": hit.get("body", ""),
+                                "published_at": published_at.date().isoformat(),
+                            }
+                        )
+                    realtime_print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
+            if results:
+                break
 
     if len(results) < max_results:
         rss_results = search_context_via_rss(stock_code, queries, max_results=max_results * 2)
@@ -420,34 +424,72 @@ def search_context_via_rss(stock_code: str, queries: list[str], max_results: int
         ("bing-news-rss", "https://www.bing.com/news/search?q={query}&format=rss&setlang=zh-cn"),
     ]
     collected: list[dict] = []
-    for query in queries:
-        for source_name, template in endpoints:
-            url = template.format(query=quote_plus(query))
-            try:
-                resp = requests.get(url, timeout=20)
-                resp.raise_for_status()
-                items = parse_rss_items(resp.text)
-            except Exception as exc:
-                realtime_print(f"[进度] {stock_code}: RSS 检索失败（{source_name}）: {exc}")
-                continue
-
-            for item in items:
-                published = parse_datetime(item.get("published_at"))
-                if not published or not within_last_3_months(published):
+    with temporary_search_proxy_env(stock_code):
+        for query in queries:
+            for source_name, template in endpoints:
+                url = template.format(query=quote_plus(query))
+                try:
+                    resp = requests.get(url, timeout=20)
+                    resp.raise_for_status()
+                    items = parse_rss_items(resp.text)
+                except Exception as exc:
+                    realtime_print(f"[进度] {stock_code}: RSS 检索失败（{source_name}）: {exc}")
                     continue
-                collected.append(
-                    {
-                        "query": query,
-                        "region": source_name,
-                        "title": item.get("title", ""),
-                        "href": item.get("href", ""),
-                        "body": item.get("body", ""),
-                        "published_at": published.date().isoformat(),
-                    }
-                )
-                if len(collected) >= max_results:
-                    return collected
+
+                for item in items:
+                    published = parse_datetime(item.get("published_at"))
+                    if not published or not within_last_3_months(published):
+                        continue
+                    collected.append(
+                        {
+                            "query": query,
+                            "region": source_name,
+                            "title": item.get("title", ""),
+                            "href": item.get("href", ""),
+                            "body": item.get("body", ""),
+                            "published_at": published.date().isoformat(),
+                        }
+                    )
+                    if len(collected) >= max_results:
+                        return collected
     return collected
+
+
+def parse_bool_env(raw: str | None, default: bool = False) -> bool:
+    value = (raw or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+@contextmanager
+def temporary_search_proxy_env(stock_code: str):
+    """按需仅在检索阶段启用代理，避免影响本地其它网络调用。"""
+    if not parse_bool_env(os.getenv("SEARCH_USE_VPN"), default=False):
+        yield
+        return
+
+    subscription_url = os.getenv("CLASH_SUBSCRIPTION_URL", "").strip()
+    if not subscription_url:
+        realtime_print(f"[进度] {stock_code}: SEARCH_USE_VPN=true 但未配置 CLASH_SUBSCRIPTION_URL，跳过代理")
+        yield
+        return
+
+    proxy_url = os.getenv("CLASH_PROXY_URL", "http://127.0.0.1:7890").strip() or "http://127.0.0.1:7890"
+    backup = {k: os.environ.get(k) for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]}
+
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+    os.environ["ALL_PROXY"] = proxy_url
+    realtime_print(f"[进度] {stock_code}: 检索阶段已开启 Clash 代理 -> {proxy_url}")
+    try:
+        yield
+    finally:
+        for key, value in backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def parse_rss_items(xml_text: str) -> list[dict]:
