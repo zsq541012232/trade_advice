@@ -202,6 +202,38 @@ def test_parse_email_stock_router():
     }
 
 
+def test_parse_email_stock_router_accepts_newline_separator():
+    router = adviser.parse_email_stock_router("a@test.com:AAPL,TSLA\nb@test.com:MSFT")
+    assert router == {
+        "a@test.com": ["AAPL", "TSLA"],
+        "b@test.com": ["MSFT"],
+    }
+
+
+def test_calculate_indicators_includes_atr_and_obv():
+    closes = [10 + i * 0.1 for i in range(100)]
+    highs = [v + 0.2 for v in closes]
+    lows = [v - 0.2 for v in closes]
+    volumes = [1000 + i * 10 for i in range(100)]
+
+    indicators = adviser.calculate_indicators(closes, highs=highs, lows=lows, volumes=volumes)
+
+    assert indicators["atr14"] is not None
+    assert indicators["obv"] is not None
+
+
+def test_load_config_reads_chain_depth_and_email_protocol(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("CHAIN_OF_SEARCH_DEPTH", "2")
+    monkeypatch.setenv("EMAIL_DELIVERY_PROTOCOL", "imap")
+
+    config = adviser.load_config()
+
+    assert config.chain_of_search_depth == 2
+    assert config.email_delivery_protocol == "imap"
+
+
 def test_parse_email_stock_router_raises_on_bad_format():
     try:
         adviser.parse_email_stock_router("a@test.com,AAPL")
