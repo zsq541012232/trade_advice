@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: CLI smoke test
+        run: python adviser.py --help
+
+  run-advice:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      AIHUBMIX_API_KEY: ${{ secrets.AIHUBMIX_API_KEY }}
+      AIHUBMIX_BASE_URL: ${{ vars.AIHUBMIX_BASE_URL }}
+      AIHUBMIX_MODEL: ${{ vars.AIHUBMIX_MODEL }}
+      STOCK_CODES: ${{ vars.STOCK_CODES }}
+      DUCKDUCKGO_MAX_RESULTS: ${{ vars.DUCKDUCKGO_MAX_RESULTS }}
+      DUCKDUCKGO_REGION: ${{ vars.DUCKDUCKGO_REGION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate required envs
+        run: |
+          if [ -z "$AIHUBMIX_API_KEY" ]; then
+            echo "Missing secret AIHUBMIX_API_KEY" >&2
+            exit 1
+          fi
+          if [ -z "$STOCK_CODES" ]; then
+            echo "Missing repo variable STOCK_CODES" >&2
+            exit 1
+          fi
+
+      - name: Run stock adviser
+        run: python adviser.py --pretty-json
