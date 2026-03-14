@@ -13,7 +13,8 @@ import re
 import smtplib
 import time
 import textwrap
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
@@ -93,8 +94,10 @@ def load_config() -> Config:
         raise ValueError("环境变量 SMTP_PORT 必须是整数") from exc
 
     market_data_provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
-    if market_data_provider not in {"auto", "akshare", "yahoo", "eastmoney"}:
-        raise ValueError("环境变量 MARKET_DATA_PROVIDER 仅支持 auto / akshare / yahoo / eastmoney")
+    if market_data_provider not in {"auto", "akshare", "yahoo", "eastmoney", "sina", "tencent", "stooq"}:
+        raise ValueError(
+            "环境变量 MARKET_DATA_PROVIDER 仅支持 auto / akshare / yahoo / eastmoney / sina / tencent / stooq"
+        )
 
     return Config(
         aihubmix_api_key=api_key,
@@ -303,8 +306,73 @@ def search_context(stock_code: str, max_results: int, region: str) -> List[dict]
         if results:
             break
 
+    if len(results) < max_results:
+        print(f"[进度] {stock_code}: DuckDuckGo 结果偏少，尝试 Google/Bing News RSS 兜底")
+        rss_results = search_context_via_rss(stock_code, queries, max_results=max_results * 2)
+        for hit in rss_results:
+            href = hit.get("href", "")
+            if href and href in seen_urls:
+                continue
+            if href:
+                seen_urls.add(href)
+            results.append(hit)
+
     print(f"[进度] {stock_code}: 检索完成，共收集 {len(results)} 条")
     return results
+
+
+def search_context_via_rss(stock_code: str, queries: list[str], max_results: int) -> list[dict]:
+    import requests
+
+    endpoints = [
+        ("google-news-rss", "https://news.google.com/rss/search?q={query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+        ("bing-news-rss", "https://www.bing.com/news/search?q={query}&format=rss&setlang=zh-cn"),
+    ]
+    collected: list[dict] = []
+    for query in queries:
+        for source_name, template in endpoints:
+            url = template.format(query=quote_plus(query))
+            try:
+                resp = requests.get(url, timeout=20)
+                resp.raise_for_status()
+                items = parse_rss_items(resp.text)
+            except Exception as exc:
+                print(f"[进度] {stock_code}: RSS 检索失败（{source_name}）: {exc}")
+                continue
+
+            for item in items:
+                published = parse_datetime(item.get("published_at"))
+                if not published or not within_last_3_months(published):
+                    continue
+                collected.append(
+                    {
+                        "query": query,
+                        "region": source_name,
+                        "title": item.get("title", ""),
+                        "href": item.get("href", ""),
+                        "body": item.get("body", ""),
+                        "published_at": published.date().isoformat(),
+                    }
+                )
+                if len(collected) >= max_results:
+                    return collected
+    return collected
+
+
+def parse_rss_items(xml_text: str) -> list[dict]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    items: list[dict] = []
+    for node in root.findall(".//item"):
+        title = (node.findtext("title") or "").strip()
+        link = (node.findtext("link") or "").strip()
+        description = (node.findtext("description") or "").strip()
+        pub_date = (node.findtext("pubDate") or "").strip()
+        items.append({"title": title, "href": link, "body": description, "published_at": pub_date})
+    return items
 
 
 def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
@@ -325,7 +393,7 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
         1) 明确区分事实、推断、假设，不得把未经验证的信息当作事实。
         2) 必须分别给出“短线建议（1天~2周）”与“长线建议（3个月~3年）”。
         3) 每类建议都要包含：方向（买入/持有/减仓/观望）、建议仓位（百分比区间）、触发条件、失效条件、止损/风控、关键依据。
-        4) 短线部分重点关注：趋势/量价/RSI/MACD/KDJ与事件催化；长线部分重点关注：基本面、行业景气度、估值与护城河。
+        4) 短线部分重点关注：趋势/量价/波动率结构/ATR/BOLL/ADX/MFI/OBV与事件催化；长线部分重点关注：基本面、行业景气度、估值、护城河与回撤风险。
         5) 必须输出“情景分析”：基准情景、乐观情景、悲观情景，并给出主观概率（合计 100%）。
         6) 必须输出“研究置信度（0-100）”与主要不确定性来源。
         7) 如果信息不足或冲突，明确写出不确定性与补充观察清单。
@@ -368,7 +436,8 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
                     "你是买方机构的首席策略分析师，兼具短线交易执行与价值投资研究能力。"
                     "你必须保持专业、中性、审慎：结论可执行、依据可追溯、风险可量化。"
                     "严禁承诺收益或使用煽动性表达。"
-                    "如果提供了结构化行情/指标快照，优先使用这些数据进行技术面分析。"
+                "如果提供了结构化行情/指标快照，优先使用这些数据进行技术面分析。"
+                "不要只停留在 MACD/KDJ，需结合 ATR、BOLL、ADX、MFI、OBV、年化波动率、回撤与支撑阻力给出可执行策略。"
                     "如证据不足，明确写出“数据不足”并降低置信度。"
                 ),
             },
@@ -563,14 +632,35 @@ def send_group_emails(config: Config, research_by_stock: dict[str, StockResearch
             if not html_sections:
                 continue
 
+            summary_rows = "".join(
+                "<tr>"
+                f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{code}</td>"
+                f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, [], '')).contexts)}</td>"
+                "<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>🧠 AI 已生成</td>"
+                "</tr>"
+                for code in stocks
+                if code in research_by_stock
+            )
+
             html_body = (
-                "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'>"
-                "<h2 style='margin:0 0 10px 0;color:#111827;'>📈 股票分析日报</h2>"
-                f"<p style='margin:0 0 14px 0;color:#6b7280;'>生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>"
+                "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f8fafc;padding:14px;'>"
+                "<div style='max-width:860px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;'>"
+                "<h2 style='margin:0 0 8px 0;color:#111827;'>📈 股票分析日报</h2>"
+                "<p style='margin:0 0 12px 0;color:#6b7280;'>"
+                f"⏰ 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 接收人：{receiver}"
+                "</p>"
+                "<table style='width:100%;border-collapse:collapse;margin:0 0 12px 0;font-size:13px;'>"
+                "<thead><tr style='background:#f1f5f9;color:#334155;'>"
+                "<th style='text-align:left;padding:8px 10px;'>股票</th>"
+                "<th style='text-align:left;padding:8px 10px;'>样本条数</th>"
+                "<th style='text-align:left;padding:8px 10px;'>状态</th>"
+                "</tr></thead>"
+                f"<tbody>{summary_rows}</tbody></table>"
+                "<p style='margin:0 0 10px 0;'>✅ 建议阅读顺序：先看“核心结论”→再看“执行计划”→最后核对“风险提示”。</p>"
                 + "".join(html_sections)
                 + "<p style='margin-top:16px;color:#6b7280;font-size:12px;'>"
-                "风险提示：以上内容仅供参考，不构成任何投资建议，请严格做好仓位与止损管理。"
-                "</p></body></html>"
+                "⚠️ 风险提示：以上内容仅供参考，不构成任何投资建议，请严格做好仓位与止损管理。"
+                "</p></div></body></html>"
             )
 
             message = MIMEMultipart("alternative")
@@ -599,6 +689,15 @@ def markdown_to_html(markdown_text: str) -> str:
     lines = markdown_text.splitlines()
     blocks: list[str] = []
     in_list = False
+    in_table = False
+    table_headers: list[str] = []
+
+    def close_table() -> None:
+        nonlocal in_table, table_headers
+        if in_table:
+            blocks.append("</tbody></table>")
+            in_table = False
+            table_headers = []
 
     for raw in lines:
         line = raw.strip()
@@ -606,6 +705,7 @@ def markdown_to_html(markdown_text: str) -> str:
             if in_list:
                 blocks.append("</ul>")
                 in_list = False
+            close_table()
             continue
 
         heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
@@ -613,13 +713,38 @@ def markdown_to_html(markdown_text: str) -> str:
             if in_list:
                 blocks.append("</ul>")
                 in_list = False
+            close_table()
             level = min(4, len(heading_match.group(1)) + 1)
             content = apply_inline_markdown(heading_match.group(2))
             blocks.append(f"<h{level} style='margin:10px 0 6px 0;'>{content}</h{level}>")
             continue
 
+        if line.startswith("|") and line.endswith("|"):
+            cols = [c.strip() for c in line.strip("|").split("|")]
+            is_delimiter = all(re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in cols)
+            if is_delimiter:
+                continue
+            if in_list:
+                blocks.append("</ul>")
+                in_list = False
+            if not in_table:
+                table_headers = cols
+                blocks.append("<table style='width:100%;border-collapse:collapse;margin:8px 0;font-size:13px;'>")
+                blocks.append("<thead><tr style='background:#f3f4f6;'>")
+                for col in table_headers:
+                    blocks.append(f"<th style='text-align:left;padding:6px;border:1px solid #e5e7eb;'>{apply_inline_markdown(col)}</th>")
+                blocks.append("</tr></thead><tbody>")
+                in_table = True
+            else:
+                blocks.append("<tr>")
+                for col in cols:
+                    blocks.append(f"<td style='padding:6px;border:1px solid #e5e7eb;'>{apply_inline_markdown(col)}</td>")
+                blocks.append("</tr>")
+            continue
+
         list_match = re.match(r"^[-*]\s+(.+)$", line)
         if list_match:
+            close_table()
             if not in_list:
                 blocks.append("<ul style='margin:6px 0 8px 20px;padding:0;'>")
                 in_list = True
@@ -633,6 +758,7 @@ def markdown_to_html(markdown_text: str) -> str:
 
     if in_list:
         blocks.append("</ul>")
+    close_table()
 
     return "".join(blocks)
 
@@ -648,7 +774,7 @@ def apply_inline_markdown(text: str) -> str:
 def fetch_market_snapshot(stock_code: str, config: Config) -> dict | None:
     providers = [config.market_data_provider]
     if config.market_data_provider == "auto":
-        providers = ["akshare", "eastmoney", "yahoo"] if stock_code.isdigit() else ["yahoo", "akshare", "eastmoney"]
+        providers = ["akshare", "eastmoney", "tencent", "sina", "yahoo", "stooq"] if stock_code.isdigit() else ["yahoo", "stooq", "akshare", "eastmoney", "tencent", "sina"]
 
     for provider in providers:
         try:
@@ -656,6 +782,12 @@ def fetch_market_snapshot(stock_code: str, config: Config) -> dict | None:
                 snapshot = fetch_market_snapshot_from_yahoo(stock_code)
             elif provider == "akshare":
                 snapshot = fetch_market_snapshot_from_akshare(stock_code)
+            elif provider == "sina":
+                snapshot = fetch_market_snapshot_from_sina(stock_code)
+            elif provider == "tencent":
+                snapshot = fetch_market_snapshot_from_tencent(stock_code)
+            elif provider == "stooq":
+                snapshot = fetch_market_snapshot_from_stooq(stock_code)
             else:
                 snapshot = fetch_market_snapshot_from_eastmoney(stock_code)
         except Exception as exc:
@@ -787,6 +919,130 @@ def fetch_market_snapshot_from_akshare(stock_code: str) -> dict | None:
     }
 
 
+def fetch_market_snapshot_from_sina(stock_code: str) -> dict | None:
+    import requests
+
+    secid, symbol = to_eastmoney_secid(stock_code)
+    exchange = "sh" if secid.startswith("1.") else "sz"
+    url = f"https://hq.sinajs.cn/list={exchange}{symbol}"
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    text = resp.text
+    parts = text.split("\"")
+    if len(parts) < 2:
+        return None
+    values = parts[1].split(",")
+    if len(values) < 4:
+        return None
+    price = safe_float(values[3])
+    prev_close = safe_float(values[2])
+    change_percent = None
+    if price is not None and prev_close and not math.isclose(prev_close, 0.0):
+        change_percent = (price - prev_close) / prev_close * 100
+
+    history = fetch_recent_closes_from_eastmoney(stock_code)
+    indicators = calculate_indicators(history)
+    return {
+        "provider": "sina",
+        "symbol": symbol,
+        "price": price,
+        "change_percent": change_percent,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "source_url": f"https://finance.sina.com.cn/realstock/company/{exchange}{symbol}/nc.shtml",
+        **indicators,
+    }
+
+
+def fetch_market_snapshot_from_tencent(stock_code: str) -> dict | None:
+    import requests
+
+    secid, symbol = to_eastmoney_secid(stock_code)
+    exchange = "sh" if secid.startswith("1.") else "sz"
+    url = f"https://qt.gtimg.cn/q={exchange}{symbol}"
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    parts = resp.text.split("~")
+    if len(parts) < 40:
+        return None
+    price = safe_float(parts[3])
+    change_percent = safe_float(parts[32])
+    history = fetch_recent_closes_from_eastmoney(stock_code)
+    indicators = calculate_indicators(history)
+    return {
+        "provider": "tencent",
+        "symbol": symbol,
+        "price": price,
+        "change_percent": change_percent,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "source_url": f"https://gu.qq.com/{exchange}{symbol}",
+        **indicators,
+    }
+
+
+def fetch_market_snapshot_from_stooq(stock_code: str) -> dict | None:
+    import requests
+
+    symbol = to_yahoo_symbol(stock_code).replace(".SS", ".CN").replace(".SZ", ".CN")
+    url = f"https://stooq.com/q/d/l/?s={symbol.lower()}&i=d"
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    lines = [line.strip() for line in resp.text.splitlines() if line.strip()]
+    if len(lines) < 3:
+        return None
+    closes: list[float] = []
+    last_close = None
+    last_date = None
+    for row in lines[1:]:
+        cols = row.split(",")
+        if len(cols) < 5:
+            continue
+        close = safe_float(cols[4])
+        if close is None:
+            continue
+        closes.append(close)
+        last_close = close
+        last_date = cols[0]
+    if not closes:
+        return None
+    indicators = calculate_indicators(closes)
+    return {
+        "provider": "stooq",
+        "symbol": symbol,
+        "price": last_close,
+        "change_percent": None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "date": last_date or datetime.now(timezone.utc).date().isoformat(),
+        "source_url": f"https://stooq.com/q/?s={symbol.lower()}",
+        **indicators,
+    }
+
+
+def fetch_recent_closes_from_eastmoney(stock_code: str) -> list[float]:
+    import requests
+
+    secid, _ = to_eastmoney_secid(stock_code)
+    kline_url = (
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+        f"secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
+        "&klt=101&fqt=1&lmt=180"
+    )
+    kline_resp = requests.get(kline_url, timeout=20)
+    kline_resp.raise_for_status()
+    klines = kline_resp.json().get("data", {}).get("klines", [])
+
+    closes: list[float] = []
+    for row in klines:
+        parts = row.split(",")
+        if len(parts) < 3:
+            continue
+        close = safe_float(parts[2])
+        if close is not None:
+            closes.append(close)
+    return closes
+
+
 def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
     import requests
 
@@ -810,15 +1066,7 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
     kline_resp.raise_for_status()
     klines = kline_resp.json().get("data", {}).get("klines", [])
 
-    closes: list[float] = []
-    for row in klines:
-        parts = row.split(",")
-        if len(parts) < 3:
-            continue
-        try:
-            closes.append(float(parts[2]))
-        except ValueError:
-            continue
+    closes = fetch_recent_closes_from_eastmoney(stock_code)
     indicators = calculate_indicators(closes)
     price = safe_divide(data.get("f43"), 100)
     change_percent = safe_divide(data.get("f170"), 100)
@@ -862,11 +1110,45 @@ def to_eastmoney_secid(stock_code: str) -> tuple[str, str]:
 
 def calculate_indicators(closes: list[float]) -> dict:
     if len(closes) < 35:
-        return {"rsi14": None, "macd": None, "macd_signal": None, "macd_hist": None, "kdj_k": None, "kdj_d": None, "kdj_j": None}
+        return {
+            "rsi14": None,
+            "macd": None,
+            "macd_signal": None,
+            "macd_hist": None,
+            "kdj_k": None,
+            "kdj_d": None,
+            "kdj_j": None,
+            "sma20": None,
+            "sma60": None,
+            "ema20": None,
+            "boll_upper": None,
+            "boll_mid": None,
+            "boll_lower": None,
+            "volatility20": None,
+            "momentum20": None,
+            "max_drawdown120": None,
+            "support20": None,
+            "resistance20": None,
+            "trend_strength": None,
+        }
 
     rsi = calculate_rsi(closes, period=14)
     macd, signal, hist = calculate_macd(closes)
     k, d, j = calculate_kdj(closes, period=9)
+    sma20 = simple_moving_average(closes, 20)
+    sma60 = simple_moving_average(closes, 60)
+    ema20 = ema_series(closes, 20)[-1] if len(closes) >= 20 else None
+    boll_upper, boll_mid, boll_lower = calculate_bollinger(closes, period=20)
+    volatility20 = calculate_volatility(closes, period=20)
+    momentum20 = calculate_momentum(closes, period=20)
+    max_drawdown120 = calculate_max_drawdown(closes[-120:])
+    support20 = min(closes[-20:]) if len(closes) >= 20 else None
+    resistance20 = max(closes[-20:]) if len(closes) >= 20 else None
+    trend_strength = None
+    ema60 = ema_series(closes, 60)[-1] if len(closes) >= 60 else None
+    if ema20 and ema60 and not math.isclose(ema60, 0.0):
+        trend_strength = (ema20 - ema60) / ema60
+
     return {
         "rsi14": round(rsi, 2) if rsi is not None else None,
         "macd": round(macd, 4) if macd is not None else None,
@@ -875,7 +1157,75 @@ def calculate_indicators(closes: list[float]) -> dict:
         "kdj_k": round(k, 2) if k is not None else None,
         "kdj_d": round(d, 2) if d is not None else None,
         "kdj_j": round(j, 2) if j is not None else None,
+        "sma20": round(sma20, 4) if sma20 is not None else None,
+        "sma60": round(sma60, 4) if sma60 is not None else None,
+        "ema20": round(ema20, 4) if ema20 is not None else None,
+        "boll_upper": round(boll_upper, 4) if boll_upper is not None else None,
+        "boll_mid": round(boll_mid, 4) if boll_mid is not None else None,
+        "boll_lower": round(boll_lower, 4) if boll_lower is not None else None,
+        "volatility20": round(volatility20, 4) if volatility20 is not None else None,
+        "momentum20": round(momentum20, 4) if momentum20 is not None else None,
+        "max_drawdown120": round(max_drawdown120, 4) if max_drawdown120 is not None else None,
+        "support20": round(support20, 4) if support20 is not None else None,
+        "resistance20": round(resistance20, 4) if resistance20 is not None else None,
+        "trend_strength": round(trend_strength, 4) if trend_strength is not None else None,
     }
+
+
+def simple_moving_average(values: list[float], period: int) -> float | None:
+    if len(values) < period:
+        return None
+    window = values[-period:]
+    return sum(window) / period
+
+
+def calculate_bollinger(values: list[float], period: int = 20, std_multiplier: float = 2.0) -> tuple[float | None, float | None, float | None]:
+    if len(values) < period:
+        return None, None, None
+    window = values[-period:]
+    mid = sum(window) / period
+    variance = sum((v - mid) ** 2 for v in window) / period
+    std = math.sqrt(variance)
+    return mid + std_multiplier * std, mid, mid - std_multiplier * std
+
+
+def calculate_volatility(values: list[float], period: int = 20) -> float | None:
+    if len(values) < period + 1:
+        return None
+    returns = []
+    window = values[-(period + 1) :]
+    for i in range(1, len(window)):
+        prev = window[i - 1]
+        curr = window[i]
+        if math.isclose(prev, 0.0):
+            continue
+        returns.append((curr - prev) / prev)
+    if len(returns) < 2:
+        return None
+    avg = sum(returns) / len(returns)
+    variance = sum((r - avg) ** 2 for r in returns) / (len(returns) - 1)
+    daily_std = math.sqrt(variance)
+    return daily_std * math.sqrt(252)
+
+
+def calculate_momentum(values: list[float], period: int = 20) -> float | None:
+    if len(values) <= period or math.isclose(values[-period - 1], 0.0):
+        return None
+    return (values[-1] - values[-period - 1]) / values[-period - 1]
+
+
+def calculate_max_drawdown(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    peak = values[0]
+    max_drawdown = 0.0
+    for value in values:
+        peak = max(peak, value)
+        if math.isclose(peak, 0.0):
+            continue
+        drawdown = (peak - value) / peak
+        max_drawdown = max(max_drawdown, drawdown)
+    return max_drawdown
 
 
 def calculate_rsi(values: list[float], period: int = 14) -> float | None:
@@ -1009,6 +1359,10 @@ def format_market_snapshot(snapshot: dict) -> str:
         f"RSI14={snapshot.get('rsi14')}, "
         f"MACD={snapshot.get('macd')}, signal={snapshot.get('macd_signal')}, hist={snapshot.get('macd_hist')}, "
         f"KDJ(K,D,J)=({snapshot.get('kdj_k')},{snapshot.get('kdj_d')},{snapshot.get('kdj_j')}), "
+        f"SMA20/SMA60=({snapshot.get('sma20')},{snapshot.get('sma60')}), EMA20={snapshot.get('ema20')}, "
+        f"BOLL(upper,mid,lower)=({snapshot.get('boll_upper')},{snapshot.get('boll_mid')},{snapshot.get('boll_lower')}), "
+        f"volatility20={snapshot.get('volatility20')}, momentum20={snapshot.get('momentum20')}, "
+        f"max_drawdown120={snapshot.get('max_drawdown120')}, support20={snapshot.get('support20')}, resistance20={snapshot.get('resistance20')}, trend_strength={snapshot.get('trend_strength')}, "
         f"timestamp={snapshot.get('timestamp')}"
     )
 

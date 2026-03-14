@@ -68,6 +68,16 @@ def test_load_config_reads_env_vars(monkeypatch):
     assert config.search_region == "us-en"
 
 
+def test_load_config_accepts_extended_market_data_provider(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "tencent")
+
+    config = adviser.load_config()
+
+    assert config.market_data_provider == "tencent"
+
+
 def test_load_config_uses_default_when_max_results_is_empty(monkeypatch):
     monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
     monkeypatch.setenv("STOCK_CODES", "AAPL")
@@ -244,6 +254,9 @@ def test_calculate_indicators_returns_values_for_enough_data():
     assert indicators["rsi14"] is not None
     assert indicators["macd"] is not None
     assert indicators["kdj_k"] is not None
+    assert indicators["boll_upper"] is not None
+    assert indicators["volatility20"] is not None
+    assert indicators["max_drawdown120"] is not None
 
 
 def test_calculate_indicators_returns_none_for_short_series():
@@ -251,6 +264,8 @@ def test_calculate_indicators_returns_none_for_short_series():
     assert indicators["rsi14"] is None
     assert indicators["macd"] is None
     assert indicators["kdj_k"] is None
+    assert indicators["boll_upper"] is None
+    assert indicators["trend_strength"] is None
 
 
 def test_markdown_to_html_supports_headings_lists_and_links():
@@ -266,6 +281,28 @@ def test_markdown_to_html_supports_headings_lists_and_links():
     assert "<strong>买入</strong>" in html
     assert "<a href='https://example.com'>公告</a>" in html
     assert "<code" in html
+
+
+def test_markdown_to_html_supports_markdown_table():
+    markdown = """| 指标 | 数值 |
+| --- | --- |
+| RSI14 | 56.2 |
+| BOLL | 中轨上方 |"""
+    html = adviser.markdown_to_html(markdown)
+    assert "<table" in html
+    assert "<th" in html
+    assert "<td" in html
+
+
+def test_parse_rss_items_reads_basic_item():
+    xml_text = """<?xml version=\"1.0\"?>
+<rss><channel>
+<item><title>新闻标题</title><link>https://example.com/1</link><description>摘要</description><pubDate>2026-03-01</pubDate></item>
+</channel></rss>"""
+    items = adviser.parse_rss_items(xml_text)
+    assert len(items) == 1
+    assert items[0]["title"] == "新闻标题"
+    assert items[0]["href"] == "https://example.com/1"
 
 
 def test_nearest_open_trade_date_uses_cache(monkeypatch):
