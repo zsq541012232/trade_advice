@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import builtins
 from contextlib import contextmanager
 import sys
@@ -16,7 +18,7 @@ import re
 import smtplib
 import time
 import textwrap
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, unquote, urlparse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -475,7 +477,17 @@ def temporary_search_proxy_env(stock_code: str):
         yield
         return
 
-    proxy_url = os.getenv("CLASH_PROXY_URL", "http://127.0.0.1:7890").strip() or "http://127.0.0.1:7890"
+    proxy_url = os.getenv("CLASH_PROXY_URL", "").strip()
+    if not proxy_url:
+        proxy_url = resolve_proxy_url_from_subscription(subscription_url)
+    if not proxy_url:
+        proxy_url = "http://127.0.0.1:7890"
+        realtime_print(f"[进度] {stock_code}: 订阅解析失败，回退默认 Clash 端口 -> {proxy_url}")
+    if not proxy_url:
+        realtime_print(f"[进度] {stock_code}: 无法从订阅中解析可用 HTTP/SOCKS 代理，跳过代理")
+        yield
+        return
+
     backup = {k: os.environ.get(k) for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]}
 
     os.environ["HTTP_PROXY"] = proxy_url
@@ -490,6 +502,153 @@ def temporary_search_proxy_env(stock_code: str):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def resolve_proxy_url_from_subscription(subscription_url: str) -> str | None:
+    """从 Clash 订阅链接提取首个可直接用于 requests 的代理 URL。"""
+    import requests
+
+    headers = {
+        "User-Agent": "ClashForWindows/0.20.39",
+        "Accept": "*/*",
+    }
+    try:
+        response = requests.get(subscription_url, headers=headers, timeout=20)
+        response.raise_for_status()
+    except Exception:
+        return None
+
+    content = (response.text or "").strip()
+    if not content:
+        return None
+
+    proxy_url = extract_proxy_url_from_yaml(content)
+    if proxy_url:
+        return proxy_url
+
+    decoded = decode_base64_subscription(content)
+    if not decoded:
+        return None
+    return extract_proxy_url_from_lines(decoded)
+
+
+def extract_proxy_url_from_yaml(content: str) -> str | None:
+    proxy_url = extract_proxy_url_from_yaml_text(content)
+    if proxy_url:
+        return proxy_url
+
+    try:
+        import yaml
+
+        config = yaml.safe_load(content)
+    except Exception:
+        return None
+
+    if not isinstance(config, dict):
+        return None
+
+    proxies = config.get("proxies")
+    if not isinstance(proxies, list):
+        return None
+
+    for proxy in proxies:
+        proxy_url = convert_clash_proxy_to_url(proxy)
+        if proxy_url:
+            return proxy_url
+    return None
+
+
+def extract_proxy_url_from_yaml_text(content: str) -> str | None:
+    """无 PyYAML 时的轻量兜底：按缩进解析 proxies 列表里的 type/server/port。"""
+    current: dict[str, str] = {}
+    in_proxies = False
+    for raw in content.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        if stripped == "proxies:":
+            in_proxies = True
+            continue
+        if not in_proxies:
+            continue
+
+        if stripped.startswith("- "):
+            proxy_url = convert_clash_proxy_to_url(current)
+            if proxy_url:
+                return proxy_url
+            current = {}
+            maybe_kv = stripped[2:].strip()
+            if ":" in maybe_kv:
+                key, value = maybe_kv.split(":", 1)
+                current[key.strip()] = value.strip().strip("'\"")
+            continue
+
+        if ":" in stripped and not stripped.startswith("-"):
+            key, value = stripped.split(":", 1)
+            current[key.strip()] = value.strip().strip("'\"")
+
+    return convert_clash_proxy_to_url(current)
+
+
+def convert_clash_proxy_to_url(proxy: object) -> str | None:
+    if not isinstance(proxy, dict):
+        return None
+
+    server = str(proxy.get("server", "")).strip()
+    port = proxy.get("port")
+    if not server or not port:
+        return None
+
+    proxy_type = str(proxy.get("type", "")).strip().lower()
+    username = str(proxy.get("username", "")).strip()
+    password = str(proxy.get("password", "")).strip()
+    auth = ""
+    if username:
+        auth = f"{username}:{password}@"
+
+    if proxy_type in {"http", "https"}:
+        return f"http://{auth}{server}:{port}"
+    if proxy_type in {"socks5", "socks5h"}:
+        return f"socks5://{auth}{server}:{port}"
+    return None
+
+
+def decode_base64_subscription(content: str) -> str | None:
+    cleaned = "".join(content.split())
+    if not cleaned:
+        return None
+
+    padded = cleaned + "=" * (-len(cleaned) % 4)
+    try:
+        decoded = base64.b64decode(padded, validate=False).decode("utf-8", errors="ignore")
+    except (binascii.Error, ValueError):
+        return None
+
+    decoded = decoded.strip()
+    return decoded or None
+
+
+def extract_proxy_url_from_lines(decoded: str) -> str | None:
+    for raw_line in decoded.splitlines():
+        line = unquote(raw_line.strip())
+        if not line:
+            continue
+        parsed = urlparse(line)
+        if parsed.scheme in {"http", "https", "socks5", "socks5h"} and parsed.hostname and parsed.port:
+            if parsed.scheme in {"http", "https"}:
+                scheme = "http"
+            elif parsed.scheme == "socks5h":
+                scheme = "socks5"
+            else:
+                scheme = parsed.scheme
+
+            auth = ""
+            if parsed.username:
+                auth = f"{parsed.username}:{parsed.password or ''}@"
+            return f"{scheme}://{auth}{parsed.hostname}:{parsed.port}"
+    return None
 
 
 def parse_rss_items(xml_text: str) -> list[dict]:

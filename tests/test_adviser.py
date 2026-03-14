@@ -252,6 +252,53 @@ def test_load_config_reads_chain_depth_and_email_protocol(monkeypatch):
     assert config.email_delivery_protocol == "imap"
 
 
+def test_convert_clash_proxy_to_url_supports_http_and_socks5():
+    http_proxy = adviser.convert_clash_proxy_to_url(
+        {
+            "type": "http",
+            "server": "127.0.0.1",
+            "port": 7890,
+            "username": "u",
+            "password": "p",
+        }
+    )
+    socks_proxy = adviser.convert_clash_proxy_to_url(
+        {
+            "type": "socks5",
+            "server": "127.0.0.1",
+            "port": 7891,
+        }
+    )
+
+    assert http_proxy == "http://u:p@127.0.0.1:7890"
+    assert socks_proxy == "socks5://127.0.0.1:7891"
+
+
+def test_extract_proxy_url_from_yaml_prefers_supported_types():
+    yaml_text = """
+proxies:
+  - name: vmess-node
+    type: vmess
+    server: vmess.example.com
+    port: 443
+  - name: http-node
+    type: http
+    server: 127.0.0.1
+    port: 7890
+"""
+    proxy_url = adviser.extract_proxy_url_from_yaml(yaml_text)
+    assert proxy_url == "http://127.0.0.1:7890"
+
+
+def test_decode_base64_subscription_and_extract_proxy_lines():
+    encoded = "aHR0cDovLzEyNy4wLjAuMTo3ODkwCnNvY2tzNTovLzEyNy4wLjAuMTo3ODkx"
+    decoded = adviser.decode_base64_subscription(encoded)
+    assert decoded is not None
+
+    proxy_url = adviser.extract_proxy_url_from_lines(decoded)
+    assert proxy_url == "http://127.0.0.1:7890"
+
+
 def test_parse_email_stock_router_raises_on_bad_format():
     try:
         adviser.parse_email_stock_router("a@test.com,AAPL")
