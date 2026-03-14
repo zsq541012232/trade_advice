@@ -37,11 +37,14 @@ cp .env.example .env
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
 - `DUCKDUCKGO_REGION`（默认 `zh-cn`）
 - `MARKET_DATA_PROVIDER`（默认 `auto`，可选 `yahoo` / `eastmoney` / `akshare`）
-- `EMAIL_STOCK_ROUTER`（例如 `a@xx.com:AAPL,TSLA;b@xx.com:MSFT`）
+- `EMAIL_STOCK_ROUTER`（推荐换行分组，例如 `a@xx.com:AAPL,TSLA` 换行 `b@xx.com:MSFT`）
 - `SENDER_EMAIL`（发送邮箱）
 - `SENDER_AUTH_CODE`（发送邮箱授权码）
 - `SMTP_HOST`（可选，默认按邮箱域名自动推断）
 - `SMTP_PORT`（默认 `465`）
+- `SMTP_SECURITY`（默认 `ssl`，可选 `starttls` / `plain`）
+- `EMAIL_DELIVERY_PROTOCOL`（默认 `smtp`，可配置 `smtp` / `pop3` / `imap` / `exchange` / `carddav`）
+- `CHAIN_OF_SEARCH_DEPTH`（默认 `1`，>1 时启用多轮检索）
 
 > A 股代码建议优先写纯数字（如 `600900`、`000001`）。脚本会自动扩展为 `600900.SH` / `SH600900` 等别名提高检索命中率。
 
@@ -69,13 +72,22 @@ python adviser.py --pretty-json
 示例：
 
 ```bash
-EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA;d@example.com:MSFT,NVDA"
+EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA
+d@example.com:MSFT,NVDA"
+
+# 也兼容旧格式（分号分隔）
+# EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA;d@example.com:MSFT,NVDA"
 ```
 
 
 ### 邮件内容美化说明（已修复 Markdown 不渲染）
 
 很多邮箱客户端不会自动把正文里的 Markdown 渲染成富文本。脚本现在会在发送 HTML 邮件前，先把常见 Markdown（标题、列表、加粗、行内代码、链接）转换为 HTML，再作为 `text/html` 正文发送，因此你在邮箱里看到的将是结构化排版，而不是 `##` / `-` / `**` 这类原始符号。
+
+除 SMTP 外，参数层面也支持 `pop3` / `imap` / `exchange` / `carddav`：
+
+- `smtp` / `pop3` / `imap` / `carddav`：统一走 SMTP 投递链路（便于和邮箱服务商配置兼容）。
+- `exchange`：走 Microsoft Graph `sendMail`（需配置 `EXCHANGE_TENANT_ID`、`EXCHANGE_CLIENT_ID`、`EXCHANGE_CLIENT_SECRET`、`EXCHANGE_SENDER_UPN`）。
 
 ## 5. 行情/技术指标来源
 
@@ -157,4 +169,3 @@ EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA;d@example.com:MSFT,NVDA"
 - 行情源自动回退链路（akshare -> eastmoney -> yahoo）
 
 建议保留 `MARKET_DATA_PROVIDER=auto`，并在日志中观察 `[进度] xxx: akshare 历史行情重试后仍失败` 这类提示，以确认是否进入了回退流程。
-

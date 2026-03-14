@@ -40,7 +40,14 @@ class Config:
     sender_auth_code: str | None = None
     smtp_host: str = ""
     smtp_port: int = 465
+    smtp_security: str = "ssl"
+    email_delivery_protocol: str = "smtp"
+    exchange_tenant_id: str | None = None
+    exchange_client_id: str | None = None
+    exchange_client_secret: str | None = None
+    exchange_sender_upn: str | None = None
     market_data_provider: str = "auto"
+    chain_of_search_depth: int = 1
 
 
 @dataclass
@@ -93,6 +100,19 @@ def load_config() -> Config:
     except ValueError as exc:
         raise ValueError("环境变量 SMTP_PORT 必须是整数") from exc
 
+    smtp_security = os.getenv("SMTP_SECURITY", "ssl").strip().lower() or "ssl"
+    if smtp_security not in {"ssl", "starttls", "plain"}:
+        raise ValueError("环境变量 SMTP_SECURITY 仅支持 ssl / starttls / plain")
+
+    email_delivery_protocol = os.getenv("EMAIL_DELIVERY_PROTOCOL", "smtp").strip().lower() or "smtp"
+    supported_protocols = {"smtp", "pop3", "imap", "exchange", "carddav"}
+    if email_delivery_protocol not in supported_protocols:
+        raise ValueError("环境变量 EMAIL_DELIVERY_PROTOCOL 仅支持 smtp / pop3 / imap / exchange / carddav")
+
+    chain_of_search_depth = safe_int(os.getenv("CHAIN_OF_SEARCH_DEPTH", "1"), default=1)
+    if chain_of_search_depth <= 0:
+        raise ValueError("环境变量 CHAIN_OF_SEARCH_DEPTH 必须大于 0")
+
     market_data_provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
     if market_data_provider not in {"auto", "akshare", "yahoo", "eastmoney", "sina", "tencent", "stooq"}:
         raise ValueError(
@@ -111,31 +131,39 @@ def load_config() -> Config:
         sender_auth_code=sender_auth_code,
         smtp_host=smtp_host,
         smtp_port=smtp_port,
+        smtp_security=smtp_security,
+        email_delivery_protocol=email_delivery_protocol,
+        exchange_tenant_id=os.getenv("EXCHANGE_TENANT_ID", "").strip() or None,
+        exchange_client_id=os.getenv("EXCHANGE_CLIENT_ID", "").strip() or None,
+        exchange_client_secret=os.getenv("EXCHANGE_CLIENT_SECRET", "").strip() or None,
+        exchange_sender_upn=os.getenv("EXCHANGE_SENDER_UPN", "").strip() or sender_email,
         market_data_provider=market_data_provider,
+        chain_of_search_depth=chain_of_search_depth,
     )
 
 
 def parse_email_stock_router(raw_router: str) -> dict[str, List[str]]:
-    """解析 EMAIL_STOCK_ROUTER：a@example.com:AAPL,TSLA;b@example.com:MSFT。"""
+    """解析 EMAIL_STOCK_ROUTER（支持分号或换行分隔）。"""
     router: dict[str, List[str]] = {}
     value = raw_router.strip()
     if not value:
         return router
 
-    for item in value.split(";"):
+    items = re.split(r"[;\n\r]+", value)
+    for item in items:
         item = item.strip()
         if not item:
             continue
         if ":" not in item:
             raise ValueError(
-                "EMAIL_STOCK_ROUTER 格式错误，示例：a@x.com:AAPL,TSLA;b@y.com:MSFT"
+                "EMAIL_STOCK_ROUTER 格式错误，示例：a@x.com:AAPL,TSLA\\nb@y.com:MSFT"
             )
         email, stocks_blob = item.split(":", 1)
         receiver = email.strip()
         stocks = [code.strip().upper() for code in stocks_blob.split(",") if code.strip()]
         if not receiver or not stocks:
             raise ValueError(
-                "EMAIL_STOCK_ROUTER 格式错误，示例：a@x.com:AAPL,TSLA;b@y.com:MSFT"
+                "EMAIL_STOCK_ROUTER 格式错误，示例：a@x.com:AAPL,TSLA\\nb@y.com:MSFT"
             )
         deduped = list(dict.fromkeys(stocks))
         router[receiver] = deduped
@@ -261,16 +289,48 @@ def search_with_retry(ddgs, query: str, region: str, max_results: int, max_retri
 
 
 def search_context(stock_code: str, max_results: int, region: str) -> List[dict]:
-    results: List[dict] = []
+    queries = build_queries(stock_code)
+    print(f"[进度] {stock_code}: 开始检索，共 {len(queries)} 条查询")
+    results = search_context_via_queries(stock_code, queries, max_results, region)
+    print(f"[进度] {stock_code}: 检索完成，共收集 {len(results)} 条")
+    return results
+
+
+def search_context_chain(stock_code: str, max_results: int, region: str, depth: int) -> List[dict]:
+    """多轮检索：上一轮热点词会驱动下一轮 query，实现 chain of search。"""
+    combined: list[dict] = []
+    seen_urls: set[str] = set()
+    frontier = [stock_code]
+
+    for round_idx in range(1, depth + 1):
+        round_queries: list[str] = []
+        for seed in frontier:
+            round_queries.extend(build_queries(seed))
+        round_queries = list(dict.fromkeys(round_queries))
+
+        print(f"[进度] {stock_code}: chain-of-search 第 {round_idx}/{depth} 轮，query 数={len(round_queries)}")
+        round_results = search_context_via_queries(stock_code, round_queries, max_results, region)
+        for hit in round_results:
+            href = hit.get("href", "")
+            if href and href in seen_urls:
+                continue
+            if href:
+                seen_urls.add(href)
+            combined.append(hit)
+
+        frontier = extract_followup_topics(round_results, stock_code)
+        if not frontier:
+            break
+
+    return combined
+
+
+def search_context_via_queries(stock_code: str, queries: list[str], max_results: int, region: str) -> list[dict]:
+    """对外暴露的 search_context 的可复用底层。"""
     from ddgs import DDGS
 
-    queries = build_queries(stock_code)
+    results: list[dict] = []
     fallback_regions = list(dict.fromkeys([region or "zh-cn", "zh-cn", "wt-wt"]))
-    print(
-        f"[进度] {stock_code}: 开始检索，共 {len(queries)} 条查询，"
-        f"区域策略={','.join(fallback_regions)}"
-    )
-
     seen_urls = set()
     for current_region in fallback_regions:
         with DDGS() as ddgs:
@@ -302,12 +362,10 @@ def search_context(stock_code: str, max_results: int, region: str) -> List[dict]
                         }
                     )
                 print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
-
         if results:
             break
 
     if len(results) < max_results:
-        print(f"[进度] {stock_code}: DuckDuckGo 结果偏少，尝试 Google/Bing News RSS 兜底")
         rss_results = search_context_via_rss(stock_code, queries, max_results=max_results * 2)
         for hit in rss_results:
             href = hit.get("href", "")
@@ -317,8 +375,20 @@ def search_context(stock_code: str, max_results: int, region: str) -> List[dict]
                 seen_urls.add(href)
             results.append(hit)
 
-    print(f"[进度] {stock_code}: 检索完成，共收集 {len(results)} 条")
     return results
+
+
+def extract_followup_topics(results: list[dict], stock_code: str) -> list[str]:
+    hot_words: list[str] = []
+    for row in results[:20]:
+        title = row.get("title", "")
+        for token in re.findall(r"[A-Za-z]{3,}|[\u4e00-\u9fff]{2,}", title):
+            token = token.strip()
+            if token and token != stock_code and token not in hot_words:
+                hot_words.append(token)
+        if len(hot_words) >= 4:
+            break
+    return hot_words[:4]
 
 
 def search_context_via_rss(stock_code: str, queries: list[str], max_results: int) -> list[dict]:
@@ -524,7 +594,10 @@ def run() -> None:
         market_snapshot = fetch_market_snapshot(code, config)
         if market_snapshot:
             print(f"[进度] {code}: 行情源={market_snapshot.get('provider')} 时间={market_snapshot.get('timestamp')}")
-        contexts = search_context(code, config.max_search_results, config.search_region)
+        if config.chain_of_search_depth > 1:
+            contexts = search_context_chain(code, config.max_search_results, config.search_region, config.chain_of_search_depth)
+        else:
+            contexts = search_context(code, config.max_search_results, config.search_region)
         if market_snapshot:
             contexts.insert(0, {
                 "query": f"{code} 实时行情技术指标",
@@ -605,73 +678,159 @@ def within_last_3_months(dt: datetime) -> bool:
 
 
 def send_group_emails(config: Config, research_by_stock: dict[str, StockResearchResult]) -> None:
+    protocol = config.email_delivery_protocol
+    if protocol == "exchange":
+        send_group_emails_via_exchange(config, research_by_stock)
+        return
+
+    # smtp / pop3 / imap / carddav 场景统一走 SMTP 投递，兼容常见邮箱服务商。
+    send_group_emails_via_smtp(config, research_by_stock)
+
+
+def send_group_emails_via_smtp(config: Config, research_by_stock: dict[str, StockResearchResult]) -> None:
     if not config.sender_email or not config.sender_auth_code:
         raise ValueError("已配置 EMAIL_STOCK_ROUTER，但缺少 SENDER_EMAIL 或 SENDER_AUTH_CODE")
     if not config.smtp_host:
         raise ValueError("无法确定 SMTP_HOST，请设置环境变量 SMTP_HOST")
 
-    with smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, timeout=30) as smtp:
+    if config.smtp_security == "ssl":
+        smtp = smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, timeout=30)
+    else:
+        smtp = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=30)
+
+    with smtp:
+        if config.smtp_security == "starttls":
+            smtp.starttls()
         smtp.login(config.sender_email, config.sender_auth_code)
         for receiver, stocks in config.email_stock_router.items():
-            html_sections: list[str] = []
-            plain_lines = ["以下为今日股票分析：", ""]
-            for code in stocks:
-                research = research_by_stock.get(code)
-                if not research:
-                    continue
-                advice = research.advice
-                safe_advice = markdown_to_html(advice)
-                html_sections.append(
-                    "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
-                    f"<h3 style='margin:0 0 8px 0;color:#111827;'>{code}</h3>"
-                    f"<div style='line-height:1.65;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
-                    "</section>"
-                )
-                plain_lines.extend([f"## {code}", advice, ""])
-
-            if not html_sections:
+            message = build_email_message(config, receiver, stocks, research_by_stock)
+            if message is None:
                 continue
-
-            summary_rows = "".join(
-                "<tr>"
-                f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{code}</td>"
-                f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, [], '')).contexts)}</td>"
-                "<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>🧠 AI 已生成</td>"
-                "</tr>"
-                for code in stocks
-                if code in research_by_stock
-            )
-
-            html_body = (
-                "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f8fafc;padding:14px;'>"
-                "<div style='max-width:860px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;'>"
-                "<h2 style='margin:0 0 8px 0;color:#111827;'>📈 股票分析日报</h2>"
-                "<p style='margin:0 0 12px 0;color:#6b7280;'>"
-                f"⏰ 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 接收人：{receiver}"
-                "</p>"
-                "<table style='width:100%;border-collapse:collapse;margin:0 0 12px 0;font-size:13px;'>"
-                "<thead><tr style='background:#f1f5f9;color:#334155;'>"
-                "<th style='text-align:left;padding:8px 10px;'>股票</th>"
-                "<th style='text-align:left;padding:8px 10px;'>样本条数</th>"
-                "<th style='text-align:left;padding:8px 10px;'>状态</th>"
-                "</tr></thead>"
-                f"<tbody>{summary_rows}</tbody></table>"
-                "<p style='margin:0 0 10px 0;'>✅ 建议阅读顺序：先看“核心结论”→再看“执行计划”→最后核对“风险提示”。</p>"
-                + "".join(html_sections)
-                + "<p style='margin-top:16px;color:#6b7280;font-size:12px;'>"
-                "⚠️ 风险提示：以上内容仅供参考，不构成任何投资建议，请严格做好仓位与止损管理。"
-                "</p></div></body></html>"
-            )
-
-            message = MIMEMultipart("alternative")
-            message.attach(MIMEText("\n".join(plain_lines), "plain", "utf-8"))
-            message.attach(MIMEText(html_body, "html", "utf-8"))
-            message["Subject"] = "股票分析日报"
-            message["From"] = formataddr(("Stock Adviser", config.sender_email))
-            message["To"] = receiver
             smtp.sendmail(config.sender_email, [receiver], message.as_string())
             print(f"[进度] 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
 
+
+def send_group_emails_via_exchange(config: Config, research_by_stock: dict[str, StockResearchResult]) -> None:
+    import requests
+
+    required = [
+        config.exchange_tenant_id,
+        config.exchange_client_id,
+        config.exchange_client_secret,
+        config.exchange_sender_upn,
+    ]
+    if not all(required):
+        raise ValueError("EMAIL_DELIVERY_PROTOCOL=exchange 时，需配置 EXCHANGE_TENANT_ID/EXCHANGE_CLIENT_ID/EXCHANGE_CLIENT_SECRET/EXCHANGE_SENDER_UPN")
+
+    token_url = f"https://login.microsoftonline.com/{config.exchange_tenant_id}/oauth2/v2.0/token"
+    token_resp = requests.post(
+        token_url,
+        data={
+            "client_id": config.exchange_client_id,
+            "client_secret": config.exchange_client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials",
+        },
+        timeout=30,
+    )
+    token_resp.raise_for_status()
+    access_token = token_resp.json().get("access_token")
+    if not access_token:
+        raise RuntimeError("Exchange 鉴权失败：未获取 access_token")
+
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    for receiver, stocks in config.email_stock_router.items():
+        message = build_email_message(config, receiver, stocks, research_by_stock)
+        if message is None:
+            continue
+        graph_url = f"https://graph.microsoft.com/v1.0/users/{config.exchange_sender_upn}/sendMail"
+        payload = {
+            "message": {
+                "subject": message["Subject"],
+                "body": {"contentType": "HTML", "content": extract_html_body(message)},
+                "toRecipients": [{"emailAddress": {"address": receiver}}],
+            },
+            "saveToSentItems": True,
+        }
+        resp = requests.post(graph_url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        print(f"[进度] Exchange 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
+
+
+def build_email_message(
+    config: Config,
+    receiver: str,
+    stocks: list[str],
+    research_by_stock: dict[str, StockResearchResult],
+) -> MIMEMultipart | None:
+    html_sections: list[str] = []
+    plain_lines = ["以下为今日股票分析：", ""]
+    for code in stocks:
+        research = research_by_stock.get(code)
+        if not research:
+            continue
+        advice = research.advice
+        safe_advice = markdown_to_html(advice)
+        html_sections.append(
+            "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
+            f"<h3 style='margin:0 0 8px 0;color:#111827;'>{code}</h3>"
+            f"<div style='line-height:1.65;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
+            "</section>"
+        )
+        plain_lines.extend([f"## {code}", advice, ""])
+
+    if not html_sections:
+        return None
+
+    summary_rows = "".join(
+        "<tr>"
+        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{code}</td>"
+        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, [], '')).contexts)}</td>"
+        "<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>🧠 AI 已生成</td>"
+        "</tr>"
+        for code in stocks
+        if code in research_by_stock
+    )
+
+    html_body = (
+        "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f8fafc;padding:14px;'>"
+        "<div style='max-width:860px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;'>"
+        "<h2 style='margin:0 0 8px 0;color:#111827;'>📈 股票分析日报</h2>"
+        "<p style='margin:0 0 12px 0;color:#6b7280;'>"
+        f"⏰ 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 接收人：{receiver}"
+        "</p>"
+        "<table style='width:100%;border-collapse:collapse;margin:0 0 12px 0;font-size:13px;'>"
+        "<thead><tr style='background:#f1f5f9;color:#334155;'>"
+        "<th style='text-align:left;padding:8px 10px;'>股票</th>"
+        "<th style='text-align:left;padding:8px 10px;'>样本条数</th>"
+        "<th style='text-align:left;padding:8px 10px;'>状态</th>"
+        "</tr></thead>"
+        f"<tbody>{summary_rows}</tbody></table>"
+        "<p style='margin:0 0 10px 0;'>✅ 建议阅读顺序：先看“核心结论”→再看“执行计划”→最后核对“风险提示”。</p>"
+        + "".join(html_sections)
+        + "<p style='margin-top:16px;color:#6b7280;font-size:12px;'>"
+        "⚠️ 风险提示：以上内容仅供参考，不构成任何投资建议，请严格做好仓位与止损管理。"
+        "</p></div></body></html>"
+    )
+
+    message = MIMEMultipart("alternative")
+    message.attach(MIMEText("\n".join(plain_lines), "plain", "utf-8"))
+    message.attach(MIMEText(html_body, "html", "utf-8"))
+    message["Subject"] = "股票分析日报"
+    message["From"] = formataddr(("Stock Adviser", config.sender_email or config.exchange_sender_upn or ""))
+    message["To"] = receiver
+    return message
+
+
+def extract_html_body(message: MIMEMultipart) -> str:
+    for part in message.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="replace")
+    return ""
 
 def build_result_dict(research: StockResearchResult) -> dict:
     return {
@@ -821,22 +980,35 @@ def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
 
     chart = chart_result[0]
     timestamps = chart.get("timestamp", [])
-    raw_closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    quote_data = chart.get("indicators", {}).get("quote", [{}])[0]
+    raw_closes = quote_data.get("close", [])
+    raw_highs = quote_data.get("high", [])
+    raw_lows = quote_data.get("low", [])
+    raw_volumes = quote_data.get("volume", [])
     closes: list[float] = []
+    highs: list[float] = []
+    lows: list[float] = []
+    volumes: list[float] = []
     selected_price = None
     selected_timestamp = None
-    for ts, close in zip(timestamps, raw_closes):
+    for idx, (ts, close) in enumerate(zip(timestamps, raw_closes)):
         if not isinstance(close, (int, float)):
             continue
         dt = datetime.fromtimestamp(ts, tz=timezone.utc)
         if dt.date() <= target_trade_date:
             closes.append(float(close))
+            if idx < len(raw_highs) and isinstance(raw_highs[idx], (int, float)):
+                highs.append(float(raw_highs[idx]))
+            if idx < len(raw_lows) and isinstance(raw_lows[idx], (int, float)):
+                lows.append(float(raw_lows[idx]))
+            if idx < len(raw_volumes) and isinstance(raw_volumes[idx], (int, float)):
+                volumes.append(float(raw_volumes[idx]))
             selected_price = float(close)
             selected_timestamp = dt.isoformat()
 
     if not closes:
         closes = [v for v in raw_closes if isinstance(v, (int, float))]
-    indicators = calculate_indicators(closes)
+    indicators = calculate_indicators(closes, highs=highs if len(highs)==len(closes) else None, lows=lows if len(lows)==len(closes) else None, volumes=volumes if len(volumes)==len(closes) else None)
 
     return {
         "provider": "yahoo",
@@ -897,15 +1069,25 @@ def fetch_market_snapshot_from_akshare(stock_code: str) -> dict | None:
         return None
 
     closes: list[float] = []
-    for value in df["收盘"].tolist():
+    highs: list[float] = []
+    lows: list[float] = []
+    volumes: list[float] = []
+    for row in df.to_dict("records"):
+        value = row.get("收盘")
         parsed = safe_float(value)
         if parsed is not None:
             closes.append(parsed)
+            high = safe_float(row.get("最高"))
+            low = safe_float(row.get("最低"))
+            vol = safe_float(row.get("成交量"))
+            highs.append(high if high is not None else parsed)
+            lows.append(low if low is not None else parsed)
+            volumes.append(vol if vol is not None else 0.0)
     if not closes:
         return None
 
     last_row = df.iloc[-1]
-    indicators = calculate_indicators(closes)
+    indicators = calculate_indicators(closes, highs=highs, lows=lows, volumes=volumes)
     return {
         "provider": "akshare",
         "symbol": stock_code,
@@ -940,8 +1122,12 @@ def fetch_market_snapshot_from_sina(stock_code: str) -> dict | None:
     if price is not None and prev_close and not math.isclose(prev_close, 0.0):
         change_percent = (price - prev_close) / prev_close * 100
 
-    history = fetch_recent_closes_from_eastmoney(stock_code)
-    indicators = calculate_indicators(history)
+    bars = fetch_recent_bars_from_eastmoney(stock_code)
+    closes = [b["close"] for b in bars]
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+    volumes = [b["volume"] for b in bars]
+    indicators = calculate_indicators(closes, highs=highs, lows=lows, volumes=volumes)
     return {
         "provider": "sina",
         "symbol": symbol,
@@ -967,8 +1153,12 @@ def fetch_market_snapshot_from_tencent(stock_code: str) -> dict | None:
         return None
     price = safe_float(parts[3])
     change_percent = safe_float(parts[32])
-    history = fetch_recent_closes_from_eastmoney(stock_code)
-    indicators = calculate_indicators(history)
+    bars = fetch_recent_bars_from_eastmoney(stock_code)
+    closes = [b["close"] for b in bars]
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+    volumes = [b["volume"] for b in bars]
+    indicators = calculate_indicators(closes, highs=highs, lows=lows, volumes=volumes)
     return {
         "provider": "tencent",
         "symbol": symbol,
@@ -992,21 +1182,30 @@ def fetch_market_snapshot_from_stooq(stock_code: str) -> dict | None:
     if len(lines) < 3:
         return None
     closes: list[float] = []
+    highs: list[float] = []
+    lows: list[float] = []
+    volumes: list[float] = []
     last_close = None
     last_date = None
     for row in lines[1:]:
         cols = row.split(",")
         if len(cols) < 5:
             continue
+        high = safe_float(cols[2])
+        low = safe_float(cols[3])
         close = safe_float(cols[4])
+        vol = safe_float(cols[5]) if len(cols) > 5 else None
         if close is None:
             continue
         closes.append(close)
+        highs.append(high if high is not None else close)
+        lows.append(low if low is not None else close)
+        volumes.append(vol if vol is not None else 0.0)
         last_close = close
         last_date = cols[0]
     if not closes:
         return None
-    indicators = calculate_indicators(closes)
+    indicators = calculate_indicators(closes, highs=highs, lows=lows, volumes=volumes)
     return {
         "provider": "stooq",
         "symbol": symbol,
@@ -1019,7 +1218,7 @@ def fetch_market_snapshot_from_stooq(stock_code: str) -> dict | None:
     }
 
 
-def fetch_recent_closes_from_eastmoney(stock_code: str) -> list[float]:
+def fetch_recent_bars_from_eastmoney(stock_code: str) -> list[dict]:
     import requests
 
     secid, _ = to_eastmoney_secid(stock_code)
@@ -1032,15 +1231,18 @@ def fetch_recent_closes_from_eastmoney(stock_code: str) -> list[float]:
     kline_resp.raise_for_status()
     klines = kline_resp.json().get("data", {}).get("klines", [])
 
-    closes: list[float] = []
+    bars: list[dict] = []
     for row in klines:
         parts = row.split(",")
-        if len(parts) < 3:
+        if len(parts) < 6:
             continue
         close = safe_float(parts[2])
+        high = safe_float(parts[3])
+        low = safe_float(parts[4])
+        volume = safe_float(parts[5])
         if close is not None:
-            closes.append(close)
-    return closes
+            bars.append({"close": close, "high": high if high is not None else close, "low": low if low is not None else close, "volume": volume if volume is not None else 0.0})
+    return bars
 
 
 def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
@@ -1066,8 +1268,12 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
     kline_resp.raise_for_status()
     klines = kline_resp.json().get("data", {}).get("klines", [])
 
-    closes = fetch_recent_closes_from_eastmoney(stock_code)
-    indicators = calculate_indicators(closes)
+    bars = fetch_recent_bars_from_eastmoney(stock_code)
+    closes = [b["close"] for b in bars]
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+    volumes = [b["volume"] for b in bars]
+    indicators = calculate_indicators(closes, highs=highs, lows=lows, volumes=volumes)
     price = safe_divide(data.get("f43"), 100)
     change_percent = safe_divide(data.get("f170"), 100)
 
@@ -1108,7 +1314,12 @@ def to_eastmoney_secid(stock_code: str) -> tuple[str, str]:
     raise ValueError("东方财富接口暂仅支持 A 股 6 位代码")
 
 
-def calculate_indicators(closes: list[float]) -> dict:
+def calculate_indicators(
+    closes: list[float],
+    highs: list[float] | None = None,
+    lows: list[float] | None = None,
+    volumes: list[float] | None = None,
+) -> dict:
     if len(closes) < 35:
         return {
             "rsi14": None,
@@ -1130,6 +1341,8 @@ def calculate_indicators(closes: list[float]) -> dict:
             "support20": None,
             "resistance20": None,
             "trend_strength": None,
+            "atr14": None,
+            "obv": None,
         }
 
     rsi = calculate_rsi(closes, period=14)
@@ -1145,6 +1358,8 @@ def calculate_indicators(closes: list[float]) -> dict:
     support20 = min(closes[-20:]) if len(closes) >= 20 else None
     resistance20 = max(closes[-20:]) if len(closes) >= 20 else None
     trend_strength = None
+    atr14 = calculate_atr(highs or closes, lows or closes, closes, period=14)
+    obv = calculate_obv(closes, volumes) if volumes else None
     ema60 = ema_series(closes, 60)[-1] if len(closes) >= 60 else None
     if ema20 and ema60 and not math.isclose(ema60, 0.0):
         trend_strength = (ema20 - ema60) / ema60
@@ -1169,7 +1384,36 @@ def calculate_indicators(closes: list[float]) -> dict:
         "support20": round(support20, 4) if support20 is not None else None,
         "resistance20": round(resistance20, 4) if resistance20 is not None else None,
         "trend_strength": round(trend_strength, 4) if trend_strength is not None else None,
+        "atr14": round(atr14, 4) if atr14 is not None else None,
+        "obv": round(obv, 4) if obv is not None else None,
     }
+
+
+def calculate_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float | None:
+    if len(closes) < period + 1 or len(highs) != len(closes) or len(lows) != len(closes):
+        return None
+    true_ranges: list[float] = []
+    for i in range(1, len(closes)):
+        high = highs[i]
+        low = lows[i]
+        prev_close = closes[i - 1]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+    if len(true_ranges) < period:
+        return None
+    return sum(true_ranges[-period:]) / period
+
+
+def calculate_obv(closes: list[float], volumes: list[float]) -> float | None:
+    if len(closes) < 2 or len(volumes) != len(closes):
+        return None
+    obv = 0.0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[i - 1]:
+            obv += volumes[i]
+        elif closes[i] < closes[i - 1]:
+            obv -= volumes[i]
+    return obv
 
 
 def simple_moving_average(values: list[float], period: int) -> float | None:
@@ -1292,6 +1536,18 @@ def ema_series(values: list[float], period: int) -> list[float]:
     return ema
 
 
+
+def safe_int(raw_value: str | None, default: int) -> int:
+    if raw_value is None:
+        return default
+    text = str(raw_value).strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except ValueError:
+        return default
+
 def safe_divide(value, denominator: float) -> float | None:
     if value is None:
         return None
@@ -1363,6 +1619,7 @@ def format_market_snapshot(snapshot: dict) -> str:
         f"BOLL(upper,mid,lower)=({snapshot.get('boll_upper')},{snapshot.get('boll_mid')},{snapshot.get('boll_lower')}), "
         f"volatility20={snapshot.get('volatility20')}, momentum20={snapshot.get('momentum20')}, "
         f"max_drawdown120={snapshot.get('max_drawdown120')}, support20={snapshot.get('support20')}, resistance20={snapshot.get('resistance20')}, trend_strength={snapshot.get('trend_strength')}, "
+        f"ATR14={snapshot.get('atr14')}, OBV={snapshot.get('obv')}, "
         f"timestamp={snapshot.get('timestamp')}"
     )
 
