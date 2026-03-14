@@ -1,6 +1,28 @@
 import adviser
 
 
+class _FakeResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = "raw error"
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise Exception("http error")
+
+    def json(self):
+        return self._payload
+
+
+class _FakeRequests:
+    def __init__(self, response):
+        self._response = response
+
+    def get(self, *args, **kwargs):
+        return self._response
+
+
 def test_build_queries_contains_expected_sections():
     queries = adviser.build_queries("AAPL")
     assert len(queries) == 3
@@ -97,3 +119,35 @@ def test_load_config_raises_when_base_url_is_invalid(monkeypatch):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "AIHUBMIX_BASE_URL 无效" in str(exc)
+
+
+def test_resolve_model_keeps_configured_model_when_available():
+    config = adviser.Config(
+        aihubmix_api_key="k",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="cn-zh",
+    )
+    req = _FakeRequests(_FakeResponse({"data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4o"}]}))
+
+    model = adviser.resolve_model(config, req)
+
+    assert model == "gpt-4o-mini"
+
+
+def test_resolve_model_falls_back_to_preferred_candidate_when_missing():
+    config = adviser.Config(
+        aihubmix_api_key="k",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="cn-zh",
+    )
+    req = _FakeRequests(_FakeResponse({"data": [{"id": "deepseek-v3"}, {"id": "qwen-plus"}]}))
+
+    model = adviser.resolve_model(config, req)
+
+    assert model == "deepseek-v3"
