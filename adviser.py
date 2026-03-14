@@ -42,6 +42,13 @@ class Config:
     market_data_provider: str = "auto"
 
 
+@dataclass
+class StockResearchResult:
+    stock_code: str
+    contexts: List[dict]
+    advice: str
+
+
 def load_config() -> Config:
     api_key = os.getenv("AIHUBMIX_API_KEY", "").strip()
     if not api_key:
@@ -311,15 +318,30 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
 
     return textwrap.dedent(
         f"""
-        请基于以下关于股票 {stock_code} 的信息，输出可执行的投资建议。
+        你正在扮演“机构级股票研究员 + 短线操盘手 + 价值投资组合经理”，请基于以下关于股票 {stock_code} 的信息，输出严谨、可审计、可执行的投资研究结论。
 
-        要求：
+        分析与合规要求：
         0) 只允许使用最近 3 个月内的新闻，且股价/技术指标必须按“最新可得数据”解读；若无法确认最新性，直接标注“数据不足”。
-        1) 必须分别给出“短线建议（1天~2周）”与“长线建议（3个月~3年）”。
-        2) 每类建议都要包含：方向（买入/持有/减仓/观望）、仓位建议（百分比）、触发条件、止损/风控、关键依据。
-        3) 如果信息不足或冲突，明确写出不确定性与补充观察点。
-        4) 严禁保证收益，必须包含风险提示。
-        5) 用简体中文，结构化输出。
+        1) 明确区分事实、推断、假设，不得把未经验证的信息当作事实。
+        2) 必须分别给出“短线建议（1天~2周）”与“长线建议（3个月~3年）”。
+        3) 每类建议都要包含：方向（买入/持有/减仓/观望）、建议仓位（百分比区间）、触发条件、失效条件、止损/风控、关键依据。
+        4) 短线部分重点关注：趋势/量价/RSI/MACD/KDJ与事件催化；长线部分重点关注：基本面、行业景气度、估值与护城河。
+        5) 必须输出“情景分析”：基准情景、乐观情景、悲观情景，并给出主观概率（合计 100%）。
+        6) 必须输出“研究置信度（0-100）”与主要不确定性来源。
+        7) 如果信息不足或冲突，明确写出不确定性与补充观察清单。
+        8) 严禁保证收益，必须包含风险提示。
+        9) 用简体中文，按下述模板结构化输出。
+
+        输出模板：
+        # {stock_code} 投研结论
+        ## 一、核心结论（先给结论）
+        ## 二、关键事实与数据新鲜度核验
+        ## 三、短线策略（1天~2周）
+        ## 四、长线策略（3个月~3年）
+        ## 五、情景分析（基准/乐观/悲观 + 概率）
+        ## 六、执行计划（入场、加减仓、止损、止盈、复盘观察点）
+        ## 七、研究置信度与不确定性
+        ## 八、风险提示（必须保留）
 
         检索信息：
         {context_blob}
@@ -343,9 +365,11 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
             {
                 "role": "system",
                 "content": (
-                    "你是专业证券投研助手。你只能根据用户提供的信息做出审慎分析，"
-                    "输出操作建议时必须同时给出风险管理建议。"
-                    "如果提供了结构化行情/指标快照，你要优先使用这些数据进行技术面分析。"
+                    "你是买方机构的首席策略分析师，兼具短线交易执行与价值投资研究能力。"
+                    "你必须保持专业、中性、审慎：结论可执行、依据可追溯、风险可量化。"
+                    "严禁承诺收益或使用煽动性表达。"
+                    "如果提供了结构化行情/指标快照，优先使用这些数据进行技术面分析。"
+                    "如证据不足，明确写出“数据不足”并降低置信度。"
                 ),
             },
             {"role": "user", "content": build_user_prompt(stock_code, contexts)},
@@ -423,8 +447,8 @@ def run() -> None:
     config = load_config()
     print(f"[进度] 已加载配置，共 {len(config.stock_codes)} 只股票待分析")
 
-    final_results = []
-    advice_by_stock: dict[str, str] = {}
+    final_results: list[dict] = []
+    research_cache: dict[str, StockResearchResult] = {}
     total = len(config.stock_codes)
     for index, code in enumerate(config.stock_codes, start=1):
         print(f"\n========== {code} ({index}/{total}) ==========")
@@ -445,17 +469,15 @@ def run() -> None:
         advice = request_ai_advice(config, code, contexts)
         print(f"[进度] {code}: AI 建议生成完成")
         print(advice)
-        final_results.append(
-            {
-                "stock_code": code,
-                "search_context_count": len(contexts),
-                "advice": advice,
-            }
+        research_cache[code] = StockResearchResult(
+            stock_code=code,
+            contexts=contexts,
+            advice=advice,
         )
-        advice_by_stock[code] = advice
+        final_results.append(build_result_dict(research_cache[code]))
 
     if config.email_stock_router:
-        send_group_emails(config, advice_by_stock)
+        send_group_emails(config, research_cache)
 
     if args.pretty_json:
         print("\n========== JSON ==========")
@@ -513,7 +535,7 @@ def within_last_3_months(dt: datetime) -> bool:
     return dt >= cutoff
 
 
-def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
+def send_group_emails(config: Config, research_by_stock: dict[str, StockResearchResult]) -> None:
     if not config.sender_email or not config.sender_auth_code:
         raise ValueError("已配置 EMAIL_STOCK_ROUTER，但缺少 SENDER_EMAIL 或 SENDER_AUTH_CODE")
     if not config.smtp_host:
@@ -525,9 +547,10 @@ def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
             html_sections: list[str] = []
             plain_lines = ["以下为今日股票分析：", ""]
             for code in stocks:
-                advice = advice_by_stock.get(code)
-                if not advice:
+                research = research_by_stock.get(code)
+                if not research:
                     continue
+                advice = research.advice
                 safe_advice = markdown_to_html(advice)
                 html_sections.append(
                     "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
@@ -558,6 +581,14 @@ def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
             message["To"] = receiver
             smtp.sendmail(config.sender_email, [receiver], message.as_string())
             print(f"[进度] 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
+
+
+def build_result_dict(research: StockResearchResult) -> dict:
+    return {
+        "stock_code": research.stock_code,
+        "search_context_count": len(research.contexts),
+        "advice": research.advice,
+    }
 
 
 def markdown_to_html(markdown_text: str) -> str:
