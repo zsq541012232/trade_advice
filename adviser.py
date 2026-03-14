@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
+import time
 import textwrap
 from urllib.parse import urlparse
 from dataclasses import dataclass
@@ -51,7 +53,7 @@ def load_config() -> Config:
     if max_search_results <= 0:
         raise ValueError("环境变量 DUCKDUCKGO_MAX_RESULTS 必须大于 0")
 
-    search_region = os.getenv("DUCKDUCKGO_REGION", "cn-zh")
+    search_region = os.getenv("DUCKDUCKGO_REGION", "zh-cn").strip() or "zh-cn"
 
     return Config(
         aihubmix_api_key=api_key,
@@ -87,9 +89,9 @@ def normalize_base_url(raw_base_url: str) -> str:
 def build_queries(stock_code: str) -> List[str]:
     aliases = stock_code_aliases(stock_code)
     topic_templates = [
-        "{alias} 新闻 舆情 最新",
+        "{alias} 股票 最新消息",
         "{alias} 财报 业绩 指引",
-        "{alias} 股价 技术指标 成交量 RSI MACD",
+        "{alias} 股价 分析 技术指标",
     ]
 
     queries: List[str] = []
@@ -121,57 +123,69 @@ def stock_code_aliases(stock_code: str) -> List[str]:
     return list(dict.fromkeys(aliases))
 
 
-def search_context(stock_code: str, max_results: int, region: str) -> List[dict]:
-    results: List[dict] = []
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        from duckduckgo_search import DDGS
-
-    queries = build_queries(stock_code)
-    print(f"[进度] {stock_code}: 开始检索，共 {len(queries)} 条查询，区域={region}")
-
-    with DDGS() as ddgs:
-        for idx, query in enumerate(queries, start=1):
-            print(f"[进度] {stock_code}: 检索 {idx}/{len(queries)} -> {query}")
-            hits: Iterable[dict] = ddgs.text(
-                query,
-                region=region,
-                max_results=max_results,
-                safesearch="off",
-            )
-            query_count = 0
-            for hit in hits:
-                query_count += 1
-                results.append(
-                    {
-                        "query": query,
-                        "title": hit.get("title", ""),
-                        "href": hit.get("href", ""),
-                        "body": hit.get("body", ""),
-                    }
-                )
-            print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
-
-    if not results:
-        print(f"[进度] {stock_code}: 主区域无结果，尝试使用全球区域兜底（wt-wt）")
-        with DDGS() as ddgs:
-            for query in queries:
-                hits: Iterable[dict] = ddgs.text(
+def search_with_retry(ddgs, query: str, region: str, max_results: int, max_retries: int = 3) -> List[dict]:
+    for attempt in range(1, max_retries + 1):
+        try:
+            # 用随机小延迟降低触发搜索限流的概率。
+            time.sleep(random.uniform(0.8, 1.6))
+            return list(
+                ddgs.text(
                     query,
-                    region="wt-wt",
+                    region=region,
                     max_results=max_results,
                     safesearch="off",
                 )
+            )
+        except Exception as exc:
+            if attempt == max_retries:
+                print(f"[进度] 检索异常（query={query}, region={region}）：{exc}")
+                return []
+            time.sleep(2 ** (attempt - 1))
+
+    return []
+
+
+def search_context(stock_code: str, max_results: int, region: str) -> List[dict]:
+    results: List[dict] = []
+    from ddgs import DDGS
+
+    queries = build_queries(stock_code)
+    fallback_regions = list(dict.fromkeys([region or "zh-cn", "zh-cn", "wt-wt"]))
+    print(
+        f"[进度] {stock_code}: 开始检索，共 {len(queries)} 条查询，"
+        f"区域策略={','.join(fallback_regions)}"
+    )
+
+    seen_urls = set()
+    for current_region in fallback_regions:
+        with DDGS() as ddgs:
+            for idx, query in enumerate(queries, start=1):
+                print(
+                    f"[进度] {stock_code}: 检索 {idx}/{len(queries)} -> {query}"
+                    f"（region={current_region}）"
+                )
+                hits: Iterable[dict] = search_with_retry(ddgs, query, current_region, max_results)
+                query_count = 0
                 for hit in hits:
+                    href = hit.get("href", "")
+                    if href and href in seen_urls:
+                        continue
+                    if href:
+                        seen_urls.add(href)
+                    query_count += 1
                     results.append(
                         {
                             "query": query,
+                            "region": current_region,
                             "title": hit.get("title", ""),
-                            "href": hit.get("href", ""),
+                            "href": href,
                             "body": hit.get("body", ""),
                         }
                     )
+                print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
+
+        if results:
+            break
 
     print(f"[进度] {stock_code}: 检索完成，共收集 {len(results)} 条")
     return results
