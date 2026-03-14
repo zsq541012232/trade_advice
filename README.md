@@ -72,13 +72,20 @@ python adviser.py --pretty-json
 EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA;d@example.com:MSFT,NVDA"
 ```
 
+
+### 邮件内容美化说明（已修复 Markdown 不渲染）
+
+很多邮箱客户端不会自动把正文里的 Markdown 渲染成富文本。脚本现在会在发送 HTML 邮件前，先把常见 Markdown（标题、列表、加粗、行内代码、链接）转换为 HTML，再作为 `text/html` 正文发送，因此你在邮箱里看到的将是结构化排版，而不是 `##` / `-` / `**` 这类原始符号。
+
 ## 5. 行情/技术指标来源
 
 仅依赖搜索引擎时，可能出现“只有新闻，缺少结构化技术指标”的问题。项目已接入直连行情源：
 
 - `Yahoo Finance`：适合美股及常见国际代码，也支持 `600900.SS` / `000001.SZ`。
 - `东方财富`：适合 A 股 6 位代码，自动拉取日线并本地计算 `RSI14`、`MACD`、`KDJ`。
-- 默认 `MARKET_DATA_PROVIDER=auto`：A 股优先东方财富，其它代码优先 Yahoo。
+- 默认 `MARKET_DATA_PROVIDER=auto`：A 股优先 `akshare`，失败后自动回退东方财富，再回退 Yahoo；非 A 股优先 Yahoo。
+- `akshare` 已增加重试（含短暂退避）与参数兜底（`qfq`/不复权），降低偶发空数据概率。
+- 交易日历查询增加了进程内缓存，避免同一轮分析中重复访问日历接口导致不稳定。
 
 ## 6. 数据时效规则
 
@@ -138,3 +145,16 @@ EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA;d@example.com:MSFT,NVDA"
 - 风险提示
 
 运行过程中会打印进度日志（检索阶段、每条 query 命中数量、AI 生成阶段），方便快速定位“无检索结果”的原因。
+
+
+## 9. 稳定性排障建议
+
+如果你观察到“同一次运行里，第一只股票能取到行情，第二只突然取不到”的情况，通常是数据源瞬时抖动或请求频率触发防护。当前版本已内置：
+
+- AkShare 行情请求自动重试 + 退避
+- AkShare 调整类型自动兜底
+- 交易日历缓存（减少重复请求）
+- 行情源自动回退链路（akshare -> eastmoney -> yahoo）
+
+建议保留 `MARKET_DATA_PROVIDER=auto`，并在日志中观察 `[进度] xxx: akshare 历史行情重试后仍失败` 这类提示，以确认是否进入了回退流程。
+
