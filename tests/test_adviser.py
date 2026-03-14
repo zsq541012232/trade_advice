@@ -1,3 +1,4 @@
+import pytest
 import adviser
 
 
@@ -41,3 +42,50 @@ def test_load_config_reads_env_vars(monkeypatch):
     assert config.aihubmix_model == "gpt-test"
     assert config.max_search_results == 7
     assert config.search_region == "us-en"
+
+
+def test_load_config_uses_default_when_max_results_is_empty(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("DUCKDUCKGO_MAX_RESULTS", "")
+
+    config = adviser.load_config()
+
+    assert config.max_search_results == 5
+
+
+def test_load_config_raises_when_max_results_is_not_int(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("DUCKDUCKGO_MAX_RESULTS", "abc")
+
+    with pytest.raises(ValueError, match="DUCKDUCKGO_MAX_RESULTS 必须是整数"):
+        adviser.load_config()
+
+
+def test_load_config_raises_when_max_results_is_not_positive(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("DUCKDUCKGO_MAX_RESULTS", "0")
+
+    with pytest.raises(ValueError, match="DUCKDUCKGO_MAX_RESULTS 必须大于 0"):
+        adviser.load_config()
+
+
+def test_load_config_uses_default_base_url_when_empty(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("AIHUBMIX_BASE_URL", "")
+
+    config = adviser.load_config()
+
+    assert config.aihubmix_base_url == "https://api.aihubmix.com/v1"
+
+
+def test_load_config_raises_when_base_url_is_missing_scheme(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("AIHUBMIX_BASE_URL", "api.aihubmix.com/v1")
+
+    with pytest.raises(ValueError, match=r"AIHUBMIX_BASE_URL 必须是有效的 http\(s\) URL"):
+        adviser.load_config()

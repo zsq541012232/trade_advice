@@ -28,7 +28,15 @@ def load_config() -> Config:
         raise ValueError("缺少环境变量 AIHUBMIX_API_KEY")
 
     base_url = os.getenv("AIHUBMIX_BASE_URL", "https://api.aihubmix.com/v1").strip()
+    if not base_url:
+        base_url = "https://api.aihubmix.com/v1"
+
+    if not base_url.startswith(("http://", "https://")):
+        raise ValueError("环境变量 AIHUBMIX_BASE_URL 必须是有效的 http(s) URL")
+
     model = os.getenv("AIHUBMIX_MODEL", "gpt-4o-mini").strip()
+    if not model:
+        model = "gpt-4o-mini"
 
     raw_codes = os.getenv("STOCK_CODES", "").strip()
     if not raw_codes:
@@ -38,7 +46,18 @@ def load_config() -> Config:
     if not stock_codes:
         raise ValueError("STOCK_CODES 解析后为空，请检查格式")
 
-    max_search_results = int(os.getenv("DUCKDUCKGO_MAX_RESULTS", "5"))
+    raw_max_results = os.getenv("DUCKDUCKGO_MAX_RESULTS", "5").strip()
+    if not raw_max_results:
+        raw_max_results = "5"
+
+    try:
+        max_search_results = int(raw_max_results)
+    except ValueError as exc:
+        raise ValueError("环境变量 DUCKDUCKGO_MAX_RESULTS 必须是整数") from exc
+
+    if max_search_results <= 0:
+        raise ValueError("环境变量 DUCKDUCKGO_MAX_RESULTS 必须大于 0")
+
     search_region = os.getenv("DUCKDUCKGO_REGION", "cn-zh")
 
     return Config(
