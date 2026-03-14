@@ -41,3 +41,37 @@ def test_load_config_reads_env_vars(monkeypatch):
     assert config.aihubmix_model == "gpt-test"
     assert config.max_search_results == 7
     assert config.search_region == "us-en"
+
+
+def test_load_config_uses_default_when_max_results_is_empty(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("DUCKDUCKGO_MAX_RESULTS", "")
+
+    config = adviser.load_config()
+
+    assert config.max_search_results == 5
+
+
+def test_load_config_raises_when_max_results_is_not_int(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("DUCKDUCKGO_MAX_RESULTS", "abc")
+
+    try:
+        adviser.load_config()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "DUCKDUCKGO_MAX_RESULTS 必须是整数" in str(exc)
+
+
+def test_load_config_raises_when_max_results_is_not_positive(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("DUCKDUCKGO_MAX_RESULTS", "0")
+
+    try:
+        adviser.load_config()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "DUCKDUCKGO_MAX_RESULTS 必须大于 0" in str(exc)

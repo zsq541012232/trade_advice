@@ -38,7 +38,18 @@ def load_config() -> Config:
     if not stock_codes:
         raise ValueError("STOCK_CODES 解析后为空，请检查格式")
 
-    max_search_results = int(os.getenv("DUCKDUCKGO_MAX_RESULTS", "5"))
+    raw_max_results = os.getenv("DUCKDUCKGO_MAX_RESULTS", "5").strip()
+    if not raw_max_results:
+        raw_max_results = "5"
+
+    try:
+        max_search_results = int(raw_max_results)
+    except ValueError as exc:
+        raise ValueError("环境变量 DUCKDUCKGO_MAX_RESULTS 必须是整数") from exc
+
+    if max_search_results <= 0:
+        raise ValueError("环境变量 DUCKDUCKGO_MAX_RESULTS 必须大于 0")
+
     search_region = os.getenv("DUCKDUCKGO_REGION", "cn-zh")
 
     return Config(
