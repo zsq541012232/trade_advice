@@ -635,12 +635,13 @@ def run() -> None:
         advice = request_ai_advice(config, code, contexts)
         realtime_print(f"[进度] {stock_label}: AI 建议生成完成")
         realtime_print(advice)
+        brief_summary = build_brief_summary_with_ai(config, code, advice)
         research_cache[code] = StockResearchResult(
             stock_code=code,
             stock_name=stock_name,
             contexts=contexts,
             advice=advice,
-            brief_summary=build_brief_summary(code, advice),
+            brief_summary=brief_summary,
         )
         final_results.append(build_result_dict(research_cache[code]))
 
@@ -801,14 +802,15 @@ def build_email_message(
         summary = research.brief_summary
         stock_label = format_stock_label(code, research.stock_name)
         quick_summary_items.append(
-            "<li style='margin:6px 0;line-height:1.55;'>"
-            f"<strong>{html.escape(stock_label)}</strong>：{html.escape(summary)}"
+            "<li style='margin:8px 0;line-height:1.6;'>"
+            f"<strong style='color:#0f172a;'>{html.escape(stock_label)}</strong>"
+            f"<div style='margin-top:4px;color:#334155;'>{html.escape(summary)}</div>"
             "</li>"
         )
         html_sections.append(
-            "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
-            f"<h3 style='margin:0 0 8px 0;color:#111827;'>{html.escape(stock_label)}</h3>"
-            f"<div style='line-height:1.65;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
+            "<section style='margin:16px 0;padding:14px;border:1px solid #e2e8f0;border-radius:12px;background:#ffffff;'>"
+            f"<h3 style='margin:0 0 10px 0;color:#0f172a;font-size:16px;'>{html.escape(stock_label)}</h3>"
+            f"<div style='line-height:1.7;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
             "</section>"
         )
         plain_lines.extend([f"- {stock_label}：{summary}", ""])
@@ -824,38 +826,39 @@ def build_email_message(
 
     summary_rows = "".join(
         "<tr>"
-        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{html.escape(format_stock_label(code, research_by_stock[code].stock_name))}</td>"
-        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, None, [], '', '信息不足')).contexts)}</td>"
-        "<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>🧠 AI 已生成</td>"
+        f"<td style='padding:10px 12px;border-bottom:1px solid #eef2f7;'>{html.escape(format_stock_label(code, research_by_stock[code].stock_name))}</td>"
+        f"<td style='padding:10px 12px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, None, [], '', '信息不足')).contexts)}</td>"
+        "<td style='padding:10px 12px;border-bottom:1px solid #eef2f7;'>✅ 已完成</td>"
         "</tr>"
         for code in stocks
         if code in research_by_stock
     )
 
     html_body = (
-        "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f8fafc;padding:14px;'>"
-        "<div style='max-width:860px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;'>"
-        "<h2 style='margin:0 0 8px 0;color:#111827;'>📈 股票分析日报</h2>"
-        "<p style='margin:0 0 12px 0;color:#6b7280;'>"
-        f"⏰ 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 接收人：{receiver}"
-        "</p>"
-        "<table style='width:100%;border-collapse:collapse;margin:0 0 12px 0;font-size:13px;'>"
-        "<thead><tr style='background:#f1f5f9;color:#334155;'>"
-        "<th style='text-align:left;padding:8px 10px;'>股票</th>"
-        "<th style='text-align:left;padding:8px 10px;'>样本条数</th>"
-        "<th style='text-align:left;padding:8px 10px;'>状态</th>"
+        "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f1f5f9;padding:18px;'>"
+        "<div style='max-width:900px;margin:0 auto;background:#ffffff;border:1px solid #dbe2ea;border-radius:14px;overflow:hidden;'>"
+        "<div style='padding:18px 20px;background:linear-gradient(120deg,#0f172a,#1d4ed8);color:#ffffff;'>"
+        "<h2 style='margin:0 0 6px 0;font-size:22px;'>📈 股票分析日报</h2>"
+        f"<p style='margin:0;font-size:13px;opacity:0.9;'>⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 {html.escape(receiver)}</p>"
+        "</div>"
+        "<div style='padding:16px 18px 6px 18px;'>"
+        "<table style='width:100%;border-collapse:collapse;margin:0 0 14px 0;font-size:13px;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;'>"
+        "<thead><tr style='background:#f8fafc;color:#334155;'>"
+        "<th style='text-align:left;padding:10px 12px;'>股票</th>"
+        "<th style='text-align:left;padding:10px 12px;'>样本条数</th>"
+        "<th style='text-align:left;padding:10px 12px;'>状态</th>"
         "</tr></thead>"
         f"<tbody>{summary_rows}</tbody></table>"
-        "<div style='margin:0 0 12px 0;padding:10px 12px;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;'>"
-        "<p style='margin:0 0 6px 0;font-weight:600;color:#0f172a;'>🧾 快速摘要（先读这一段）</p>"
+        "<div style='margin:0 0 14px 0;padding:12px 14px;background:#f8fafc;border:1px solid #dbeafe;border-radius:10px;'>"
+        "<p style='margin:0 0 8px 0;font-weight:700;color:#0f172a;'>🧾 AI 快速摘要</p>"
         "<ul style='margin:0;padding-left:20px;color:#334155;font-size:14px;'>"
         + "".join(quick_summary_items)
         + "</ul></div>"
-        "<p style='margin:0 0 10px 0;'>✅ 建议阅读顺序：先看“核心结论”→再看“执行计划”→最后核对“风险提示”。</p>"
+        "<p style='margin:0 0 8px 0;color:#475569;font-size:13px;'>📌 阅读顺序：核心结论 → 执行计划 → 风险提示。</p>"
         + "".join(html_sections)
-        + "<p style='margin-top:16px;color:#6b7280;font-size:12px;'>"
+        + "<p style='margin:14px 0 18px 0;color:#64748b;font-size:12px;'>"
         "⚠️ 风险提示：以上内容仅供参考，不构成任何投资建议，请严格做好仓位与止损管理。"
-        "</p></div></body></html>"
+        "</p></div></div></body></html>"
     )
 
     message = MIMEMultipart("alternative")
@@ -927,6 +930,56 @@ def fetch_cn_stock_name(stock_code: str) -> str | None:
         return None
 
 
+
+def build_brief_summary_with_ai(config: Config, stock_code: str, advice: str) -> str:
+    ai_summary = request_ai_brief_summary(config, stock_code, advice)
+    if ai_summary:
+        return ai_summary
+    return build_brief_summary(stock_code, advice)
+
+
+def request_ai_brief_summary(config: Config, stock_code: str, advice: str) -> str | None:
+    url = f"{config.aihubmix_base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {config.aihubmix_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    import requests
+
+    payload = {
+        "model": resolve_model(config, requests),
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是专业投研摘要助手。"
+                    "请将长文压缩为高可信、可执行的极简摘要，禁止夸张表达。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"请将 {stock_code} 的投研结论浓缩成 1 句中文摘要（25~60字）。"
+                    "要求包含：方向、仓位/动作、最大风险点。"
+                    "仅输出摘要本身，不要编号和前后缀。\n\n"
+                    f"原文：\n{advice}"
+                ),
+            },
+        ],
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        content = re.sub(r"\s+", " ", content)
+        return content[:120]
+    except Exception as exc:
+        realtime_print(f"[进度] {stock_code}: AI 摘要生成失败，回退规则摘要: {exc}")
+        return None
 def build_brief_summary(stock_code: str, advice: str) -> str:
     direction = extract_with_patterns(
         advice,
@@ -1092,15 +1145,14 @@ def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
     symbol = to_yahoo_symbol(stock_code)
     target_trade_date = nearest_open_trade_date()
     quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
-    quote_resp = requests.get(quote_url, timeout=20)
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    quote_resp = requests.get(quote_url, headers=headers, timeout=20)
     quote_resp.raise_for_status()
     quote_results = quote_resp.json().get("quoteResponse", {}).get("result", [])
-    if not quote_results:
-        return None
-    quote = quote_results[0]
+    quote = quote_results[0] if quote_results else {}
 
     chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=6mo&interval=1d"
-    chart_resp = requests.get(chart_url, timeout=20)
+    chart_resp = requests.get(chart_url, headers=headers, timeout=20)
     chart_resp.raise_for_status()
     chart_result = chart_resp.json().get("chart", {}).get("result", [])
     if not chart_result:
@@ -1144,7 +1196,7 @@ def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
         "stock_name": quote.get("shortName") or quote.get("longName"),
         "price": selected_price or quote.get("regularMarketPrice"),
         "change_percent": quote.get("regularMarketChangePercent"),
-        "timestamp": selected_timestamp or quote.get("regularMarketTime"),
+        "timestamp": selected_timestamp or to_iso_timestamp(quote.get("regularMarketTime")),
         "date": target_trade_date.isoformat(),
         "source_url": f"https://finance.yahoo.com/quote/{symbol}",
         "trade_date": target_trade_date.isoformat(),
@@ -1384,7 +1436,8 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
         "https://push2.eastmoney.com/api/qt/stock/get?"
         f"secid={secid}&fields=f43,f44,f45,f46,f47,f48,f49,f57,f58,f60,f169,f170"
     )
-    quote_resp = requests.get(quote_url, timeout=20)
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    quote_resp = requests.get(quote_url, headers=headers, timeout=20)
     quote_resp.raise_for_status()
     data = quote_resp.json().get("data")
     if not data:
@@ -1421,18 +1474,54 @@ def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
     }
 
 
-def to_yahoo_symbol(stock_code: str) -> str:
+
+def normalize_stock_code(stock_code: str) -> str:
     code = stock_code.strip().upper()
+    if not code:
+        return code
+
+    for prefix in ("US.", "NASDAQ.", "NYSE."):
+        if code.startswith(prefix) and len(code) > len(prefix):
+            return code[len(prefix):]
+
+    us_suffix = re.fullmatch(r"([A-Z][A-Z0-9\-]{0,9})\.US", code)
+    if us_suffix:
+        return us_suffix.group(1)
+
+    a_share_prefix = re.fullmatch(r"(SH|SZ)\.?([0-9]{6})", code)
+    if a_share_prefix:
+        return a_share_prefix.group(2)
+
+    a_share_suffix = re.fullmatch(r"([0-9]{6})\.(SH|SZ)", code)
+    if a_share_suffix:
+        return a_share_suffix.group(1)
+
+    return code
+
+
+
+def to_iso_timestamp(value: object) -> str | None:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def to_yahoo_symbol(stock_code: str) -> str:
+    code = normalize_stock_code(stock_code)
     if "." in code:
         return code
     if code.isdigit() and len(code) == 6:
         suffix = "SS" if code.startswith("6") else "SZ"
         return f"{code}.{suffix}"
+    if code.isdigit() and len(code) in {4, 5}:
+        return f"{code.zfill(4)}.HK"
     return code
 
 
 def to_eastmoney_secid(stock_code: str) -> tuple[str, str]:
-    code = stock_code.strip().upper()
+    code = normalize_stock_code(stock_code)
     if code.isdigit() and len(code) == 6:
         market = "1" if code.startswith("6") else "0"
         return f"{market}.{code}", code

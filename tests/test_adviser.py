@@ -185,6 +185,18 @@ def test_build_queries_expands_aliases_for_a_share_code():
     assert "600900 股价 分析 技术指标" in queries
 
 
+def test_to_yahoo_symbol_accepts_common_us_code_formats():
+    assert adviser.to_yahoo_symbol("AAPL") == "AAPL"
+    assert adviser.to_yahoo_symbol("US.AAPL") == "AAPL"
+    assert adviser.to_yahoo_symbol("AAPL.US") == "AAPL"
+
+
+def test_to_eastmoney_secid_accepts_prefixed_a_share_code():
+    secid, symbol = adviser.to_eastmoney_secid("SH.600900")
+    assert secid == "1.600900"
+    assert symbol == "600900"
+
+
 def test_normalize_query_key_dedup_semantic_aliases():
     q1 = adviser.normalize_query_key("600900 股票 最新消息")
     q2 = adviser.normalize_query_key("SH600900 股票 最新消息")
