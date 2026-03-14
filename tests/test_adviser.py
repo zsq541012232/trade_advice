@@ -164,3 +164,47 @@ def test_build_queries_expands_aliases_for_a_share_code():
     assert "600900 股票 最新消息" in queries
     assert "600900.SH 财报 业绩 指引" in queries
     assert "SH600900 股价 分析 技术指标" in queries
+
+
+def test_parse_email_stock_router():
+    router = adviser.parse_email_stock_router("a@test.com:AAPL,TSLA;b@test.com:MSFT")
+    assert router == {
+        "a@test.com": ["AAPL", "TSLA"],
+        "b@test.com": ["MSFT"],
+    }
+
+
+def test_parse_email_stock_router_raises_on_bad_format():
+    try:
+        adviser.parse_email_stock_router("a@test.com,AAPL")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "EMAIL_STOCK_ROUTER 格式错误" in str(exc)
+
+
+def test_load_config_can_read_stocks_from_router(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.delenv("STOCK_CODES", raising=False)
+    monkeypatch.setenv("EMAIL_STOCK_ROUTER", "a@test.com:TSLA,AAPL;b@test.com:MSFT")
+
+    config = adviser.load_config()
+
+    assert config.stock_codes == ["AAPL", "MSFT", "TSLA"]
+    assert config.email_stock_router["a@test.com"] == ["TSLA", "AAPL"]
+
+
+def test_parse_datetime_supports_cn_date():
+    dt = adviser.parse_datetime("发布时间 2026年03月01日")
+    assert dt is not None
+    assert dt.year == 2026
+    assert dt.month == 3
+    assert dt.day == 1
+
+
+def test_within_last_3_months():
+    from datetime import datetime, timedelta, timezone
+
+    recent = datetime.now(timezone.utc) - timedelta(days=10)
+    old = datetime.now(timezone.utc) - timedelta(days=150)
+    assert adviser.within_last_3_months(recent) is True
+    assert adviser.within_last_3_months(old) is False

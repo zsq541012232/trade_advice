@@ -26,7 +26,7 @@ cp .env.example .env
 最少需要：
 
 - `AIHUBMIX_API_KEY`
-- `STOCK_CODES`（例如 `AAPL,TSLA,600519.SS`）
+- `STOCK_CODES`（例如 `AAPL,TSLA,600519.SS`）或 `EMAIL_STOCK_ROUTER`
 
 你也可以自定义：
 
@@ -34,8 +34,33 @@ cp .env.example .env
 - `AIHUBMIX_MODEL`（默认 `gpt-4o-mini`）
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
 - `DUCKDUCKGO_REGION`（默认 `zh-cn`）
+- `EMAIL_STOCK_ROUTER`（例如 `a@xx.com:AAPL,TSLA;b@xx.com:MSFT`，用于按邮箱分组发送）
+- `SENDER_EMAIL`（发送邮箱）
+- `SENDER_AUTH_CODE`（发送邮箱授权码）
+- `SMTP_HOST`（可选，默认按发送邮箱域名自动推断）
+- `SMTP_PORT`（默认 `465`）
 
 > A 股代码建议优先写纯数字（如 `600900`、`000001`）。脚本会自动扩展为 `600900.SH` / `SH600900` 等别名提高检索命中率。
+
+
+## 邮件分组发送
+
+当配置 `EMAIL_STOCK_ROUTER` 后，脚本会在分析完成后自动发送分组邮件：
+
+- 一个邮箱可绑定多只股票
+- 不同邮箱可接收不同股票集合
+- 发送方账号从 `SENDER_EMAIL` + `SENDER_AUTH_CODE` 读取
+
+示例：
+
+```bash
+EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA;d@example.com:MSFT,NVDA"
+```
+
+## 数据时效规则
+
+- 检索阶段仅接纳最近约 3 个月（92 天）内且可解析日期的新闻。
+- 提示词强制要求大模型仅按“最新可得股价和技术指标”给出建议；若无法确认最新性，需明确标注“数据不足”。
 
 ## 3. 本地运行
 

@@ -7,10 +7,15 @@ import argparse
 import json
 import os
 import random
+import re
+import smtplib
 import time
 import textwrap
 from urllib.parse import urlparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from email.mime.text import MIMEText
+from email.utils import formataddr
 from typing import Iterable, List
 
 
@@ -23,6 +28,11 @@ class Config:
     stock_codes: List[str]
     max_search_results: int
     search_region: str
+    email_stock_router: dict[str, List[str]] = field(default_factory=dict)
+    sender_email: str | None = None
+    sender_auth_code: str | None = None
+    smtp_host: str = ""
+    smtp_port: int = 465
 
 
 def load_config() -> Config:
@@ -33,13 +43,17 @@ def load_config() -> Config:
     base_url = normalize_base_url(os.getenv("AIHUBMIX_BASE_URL", "https://api.aihubmix.com/v1"))
     model = os.getenv("AIHUBMIX_MODEL", "gpt-4o-mini").strip()
 
-    raw_codes = os.getenv("STOCK_CODES", "").strip()
-    if not raw_codes:
-        raise ValueError("缺少环境变量 STOCK_CODES，例如：AAPL,TSLA,600519.SS")
+    router = parse_email_stock_router(os.getenv("EMAIL_STOCK_ROUTER", ""))
 
+    raw_codes = os.getenv("STOCK_CODES", "").strip()
     stock_codes = [code.strip() for code in raw_codes.split(",") if code.strip()]
     if not stock_codes:
-        raise ValueError("STOCK_CODES 解析后为空，请检查格式")
+        stock_codes = sorted({code for codes in router.values() for code in codes})
+
+    if not stock_codes:
+        raise ValueError(
+            "缺少股票配置：请设置 STOCK_CODES 或 EMAIL_STOCK_ROUTER（例如 a@x.com:AAPL,TSLA;b@y.com:MSFT）"
+        )
 
     raw_max_results = os.getenv("DUCKDUCKGO_MAX_RESULTS", "5").strip()
     if not raw_max_results:
@@ -55,6 +69,15 @@ def load_config() -> Config:
 
     search_region = os.getenv("DUCKDUCKGO_REGION", "zh-cn").strip() or "zh-cn"
 
+    sender_email = os.getenv("SENDER_EMAIL", "").strip() or None
+    sender_auth_code = os.getenv("SENDER_AUTH_CODE", "").strip() or None
+    smtp_host = os.getenv("SMTP_HOST", "").strip() or infer_smtp_host(sender_email)
+    raw_smtp_port = os.getenv("SMTP_PORT", "465").strip() or "465"
+    try:
+        smtp_port = int(raw_smtp_port)
+    except ValueError as exc:
+        raise ValueError("环境变量 SMTP_PORT 必须是整数") from exc
+
     return Config(
         aihubmix_api_key=api_key,
         aihubmix_base_url=base_url.rstrip("/"),
@@ -62,7 +85,56 @@ def load_config() -> Config:
         stock_codes=stock_codes,
         max_search_results=max_search_results,
         search_region=search_region,
+        email_stock_router=router,
+        sender_email=sender_email,
+        sender_auth_code=sender_auth_code,
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
     )
+
+
+def parse_email_stock_router(raw_router: str) -> dict[str, List[str]]:
+    """解析 EMAIL_STOCK_ROUTER：a@example.com:AAPL,TSLA;b@example.com:MSFT。"""
+    router: dict[str, List[str]] = {}
+    value = raw_router.strip()
+    if not value:
+        return router
+
+    for item in value.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(
+                "EMAIL_STOCK_ROUTER 格式错误，示例：a@x.com:AAPL,TSLA;b@y.com:MSFT"
+            )
+        email, stocks_blob = item.split(":", 1)
+        receiver = email.strip()
+        stocks = [code.strip().upper() for code in stocks_blob.split(",") if code.strip()]
+        if not receiver or not stocks:
+            raise ValueError(
+                "EMAIL_STOCK_ROUTER 格式错误，示例：a@x.com:AAPL,TSLA;b@y.com:MSFT"
+            )
+        deduped = list(dict.fromkeys(stocks))
+        router[receiver] = deduped
+
+    return router
+
+
+def infer_smtp_host(sender_email: str | None) -> str:
+    if not sender_email or "@" not in sender_email:
+        return ""
+
+    domain = sender_email.split("@", 1)[1].lower()
+    mapping = {
+        "qq.com": "smtp.qq.com",
+        "163.com": "smtp.163.com",
+        "126.com": "smtp.126.com",
+        "gmail.com": "smtp.gmail.com",
+        "outlook.com": "smtp.office365.com",
+        "hotmail.com": "smtp.office365.com",
+    }
+    return mapping.get(domain, f"smtp.{domain}")
 
 
 def normalize_base_url(raw_base_url: str) -> str:
@@ -167,6 +239,9 @@ def search_context(stock_code: str, max_results: int, region: str) -> List[dict]
                 hits: Iterable[dict] = search_with_retry(ddgs, query, current_region, max_results)
                 query_count = 0
                 for hit in hits:
+                    published_at = parse_published_at(hit)
+                    if not published_at or not within_last_3_months(published_at):
+                        continue
                     href = hit.get("href", "")
                     if href and href in seen_urls:
                         continue
@@ -180,6 +255,7 @@ def search_context(stock_code: str, max_results: int, region: str) -> List[dict]
                             "title": hit.get("title", ""),
                             "href": href,
                             "body": hit.get("body", ""),
+                            "published_at": published_at.date().isoformat(),
                         }
                     )
                 print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
@@ -195,7 +271,7 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
     context_lines = []
     for i, item in enumerate(contexts, start=1):
         context_lines.append(
-            f"[{i}] query={item['query']}\\ntitle={item['title']}\\nurl={item['href']}\\nsummary={item['body']}"
+            f"[{i}] query={item['query']}\\ndate={item.get('published_at', 'unknown')}\\ntitle={item['title']}\\nurl={item['href']}\\nsummary={item['body']}"
         )
 
     context_blob = "\n\n".join(context_lines) if context_lines else "(无检索结果)"
@@ -205,6 +281,7 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
         请基于以下关于股票 {stock_code} 的信息，输出可执行的投资建议。
 
         要求：
+        0) 只允许使用最近 3 个月内的新闻，且股价/技术指标必须按“最新可得数据”解读；若无法确认最新性，直接标注“数据不足”。
         1) 必须分别给出“短线建议（1天~2周）”与“长线建议（3个月~3年）”。
         2) 每类建议都要包含：方向（买入/持有/减仓/观望）、仓位建议（百分比）、触发条件、止损/风控、关键依据。
         3) 如果信息不足或冲突，明确写出不确定性与补充观察点。
@@ -313,6 +390,7 @@ def run() -> None:
     print(f"[进度] 已加载配置，共 {len(config.stock_codes)} 只股票待分析")
 
     final_results = []
+    advice_by_stock: dict[str, str] = {}
     total = len(config.stock_codes)
     for index, code in enumerate(config.stock_codes, start=1):
         print(f"\n========== {code} ({index}/{total}) ==========")
@@ -328,10 +406,92 @@ def run() -> None:
                 "advice": advice,
             }
         )
+        advice_by_stock[code] = advice
+
+    if config.email_stock_router:
+        send_group_emails(config, advice_by_stock)
 
     if args.pretty_json:
         print("\n========== JSON ==========")
         print(json.dumps(final_results, ensure_ascii=False, indent=2))
+
+
+def parse_published_at(hit: dict) -> datetime | None:
+    """尽力解析检索结果时间，无法解析则返回 None。"""
+    candidates = [
+        hit.get("date"),
+        hit.get("published"),
+        hit.get("published_at"),
+        hit.get("datetime"),
+        hit.get("body"),
+    ]
+    for candidate in candidates:
+        dt = parse_datetime(candidate)
+        if dt:
+            return dt
+    return None
+
+
+def parse_datetime(raw_value: str | None) -> datetime | None:
+    if not raw_value:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+
+    patterns = [
+        r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})日?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        year, month, day = map(int, match.groups())
+        try:
+            return datetime(year, month, day, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    return None
+
+
+def within_last_3_months(dt: datetime) -> bool:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=92)
+    return dt >= cutoff
+
+
+def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
+    if not config.sender_email or not config.sender_auth_code:
+        raise ValueError("已配置 EMAIL_STOCK_ROUTER，但缺少 SENDER_EMAIL 或 SENDER_AUTH_CODE")
+    if not config.smtp_host:
+        raise ValueError("无法确定 SMTP_HOST，请设置环境变量 SMTP_HOST")
+
+    with smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, timeout=30) as smtp:
+        smtp.login(config.sender_email, config.sender_auth_code)
+        for receiver, stocks in config.email_stock_router.items():
+            body_lines = ["以下为今日股票分析：", ""]
+            for code in stocks:
+                advice = advice_by_stock.get(code)
+                if not advice:
+                    continue
+                body_lines.extend([f"## {code}", advice, ""])
+
+            if len(body_lines) <= 2:
+                continue
+
+            message = MIMEText("\n".join(body_lines), "plain", "utf-8")
+            message["Subject"] = "股票分析日报"
+            message["From"] = formataddr(("Stock Adviser", config.sender_email))
+            message["To"] = receiver
+            smtp.sendmail(config.sender_email, [receiver], message.as_string())
+            print(f"[进度] 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
 
 
 if __name__ == "__main__":
