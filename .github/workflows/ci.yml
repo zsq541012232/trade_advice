@@ -4,10 +4,13 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    # 交易日（周一到周五）每 5 分钟触发一次，再由 RUN_ADVICE_TIME 控制是否真正执行。
+    - cron: '*/5 * * * 1-5'
 
 jobs:
   run-advice:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     env:
       AIHUBMIX_API_KEY: ${{ secrets.AIHUBMIX_API_KEY }}
@@ -22,6 +25,8 @@ jobs:
       SENDER_AUTH_CODE: ${{ secrets.SENDER_AUTH_CODE }}
       SMTP_HOST: ${{ vars.SMTP_HOST }}
       SMTP_PORT: ${{ vars.SMTP_PORT }}
+      RUN_ADVICE_TIME: ${{ vars.RUN_ADVICE_TIME }}
+      RUN_ADVICE_TIMEZONE: ${{ vars.RUN_ADVICE_TIMEZONE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,5 +50,28 @@ jobs:
             exit 1
           fi
 
+      - name: Check schedule window
+        if: github.event_name == 'schedule'
+        run: |
+          RUN_TIME="${RUN_ADVICE_TIME:-18:00}"
+          RUN_TZ="${RUN_ADVICE_TIMEZONE:-Asia/Shanghai}"
+
+          if ! echo "$RUN_TIME" | grep -Eq '^([01][0-9]|2[0-3]):[0-5][0-9]$'; then
+            echo "RUN_ADVICE_TIME must be HH:MM, got: $RUN_TIME" >&2
+            exit 1
+          fi
+
+          NOW_TIME=$(TZ="$RUN_TZ" date +"%H:%M")
+          echo "Now in $RUN_TZ: $NOW_TIME; target: $RUN_TIME"
+
+          if [ "$NOW_TIME" != "$RUN_TIME" ]; then
+            echo "Not in scheduled window, skip running adviser."
+            echo "SHOULD_RUN=false" >> "$GITHUB_ENV"
+          else
+            echo "In scheduled window, adviser will run."
+            echo "SHOULD_RUN=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Run stock adviser
+        if: github.event_name == 'workflow_dispatch' || env.SHOULD_RUN == 'true'
         run: python adviser.py --pretty-json
