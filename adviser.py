@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import textwrap
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Iterable, List
 
@@ -27,7 +28,7 @@ def load_config() -> Config:
     if not api_key:
         raise ValueError("缺少环境变量 AIHUBMIX_API_KEY")
 
-    base_url = os.getenv("AIHUBMIX_BASE_URL", "https://api.aihubmix.com/v1").strip()
+    base_url = normalize_base_url(os.getenv("AIHUBMIX_BASE_URL", "https://api.aihubmix.com/v1"))
     model = os.getenv("AIHUBMIX_MODEL", "gpt-4o-mini").strip()
 
     raw_codes = os.getenv("STOCK_CODES", "").strip()
@@ -59,6 +60,27 @@ def load_config() -> Config:
         stock_codes=stock_codes,
         max_search_results=max_search_results,
         search_region=search_region,
+    )
+
+
+def normalize_base_url(raw_base_url: str) -> str:
+    base_url = raw_base_url.strip()
+    if not base_url:
+        return "https://api.aihubmix.com/v1"
+
+    parsed = urlparse(base_url)
+
+    if parsed.scheme and parsed.netloc:
+        return base_url.rstrip("/")
+
+    if not parsed.scheme and parsed.path and not parsed.path.startswith("/"):
+        with_scheme = f"https://{parsed.path}"
+        parsed_with_scheme = urlparse(with_scheme)
+        if parsed_with_scheme.netloc:
+            return with_scheme.rstrip("/")
+
+    raise ValueError(
+        "环境变量 AIHUBMIX_BASE_URL 无效，请提供完整 URL（例如 https://api.aihubmix.com/v1）"
     )
 
 
