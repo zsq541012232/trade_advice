@@ -75,3 +75,25 @@ def test_load_config_raises_when_max_results_is_not_positive(monkeypatch):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "DUCKDUCKGO_MAX_RESULTS 必须大于 0" in str(exc)
+
+
+def test_load_config_accepts_base_url_without_scheme(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("AIHUBMIX_BASE_URL", "api.aihubmix.com/v1")
+
+    config = adviser.load_config()
+
+    assert config.aihubmix_base_url == "https://api.aihubmix.com/v1"
+
+
+def test_load_config_raises_when_base_url_is_invalid(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("AIHUBMIX_BASE_URL", "/chat/completions")
+
+    try:
+        adviser.load_config()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "AIHUBMIX_BASE_URL 无效" in str(exc)
