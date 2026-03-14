@@ -55,6 +55,7 @@ class StockResearchResult:
     stock_code: str
     contexts: List[dict]
     advice: str
+    brief_summary: str
 
 
 def load_config() -> Config:
@@ -615,6 +616,7 @@ def run() -> None:
             stock_code=code,
             contexts=contexts,
             advice=advice,
+            brief_summary=build_brief_summary(code, advice),
         )
         final_results.append(build_result_dict(research_cache[code]))
 
@@ -764,6 +766,7 @@ def build_email_message(
     research_by_stock: dict[str, StockResearchResult],
 ) -> MIMEMultipart | None:
     html_sections: list[str] = []
+    quick_summary_items: list[str] = []
     plain_lines = ["以下为今日股票分析：", ""]
     for code in stocks:
         research = research_by_stock.get(code)
@@ -771,13 +774,25 @@ def build_email_message(
             continue
         advice = research.advice
         safe_advice = markdown_to_html(advice)
+        summary = research.brief_summary
+        quick_summary_items.append(
+            "<li style='margin:6px 0;line-height:1.55;'>"
+            f"<strong>{code}</strong>：{html.escape(summary)}"
+            "</li>"
+        )
         html_sections.append(
             "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
             f"<h3 style='margin:0 0 8px 0;color:#111827;'>{code}</h3>"
             f"<div style='line-height:1.65;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
             "</section>"
         )
-        plain_lines.extend([f"## {code}", advice, ""])
+        plain_lines.extend([f"- {code}：{summary}", ""])
+
+    for code in stocks:
+        research = research_by_stock.get(code)
+        if not research:
+            continue
+        plain_lines.extend([f"## {code}", research.advice, ""])
 
     if not html_sections:
         return None
@@ -785,7 +800,7 @@ def build_email_message(
     summary_rows = "".join(
         "<tr>"
         f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{code}</td>"
-        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, [], '')).contexts)}</td>"
+        f"<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, [], '', '信息不足')).contexts)}</td>"
         "<td style='padding:8px 10px;border-bottom:1px solid #eef2f7;'>🧠 AI 已生成</td>"
         "</tr>"
         for code in stocks
@@ -806,6 +821,11 @@ def build_email_message(
         "<th style='text-align:left;padding:8px 10px;'>状态</th>"
         "</tr></thead>"
         f"<tbody>{summary_rows}</tbody></table>"
+        "<div style='margin:0 0 12px 0;padding:10px 12px;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;'>"
+        "<p style='margin:0 0 6px 0;font-weight:600;color:#0f172a;'>🧾 快速摘要（先读这一段）</p>"
+        "<ul style='margin:0;padding-left:20px;color:#334155;font-size:14px;'>"
+        + "".join(quick_summary_items)
+        + "</ul></div>"
         "<p style='margin:0 0 10px 0;'>✅ 建议阅读顺序：先看“核心结论”→再看“执行计划”→最后核对“风险提示”。</p>"
         + "".join(html_sections)
         + "<p style='margin-top:16px;color:#6b7280;font-size:12px;'>"
@@ -836,8 +856,50 @@ def build_result_dict(research: StockResearchResult) -> dict:
     return {
         "stock_code": research.stock_code,
         "search_context_count": len(research.contexts),
+        "brief_summary": research.brief_summary,
         "advice": research.advice,
     }
+
+
+def build_brief_summary(stock_code: str, advice: str) -> str:
+    direction = extract_with_patterns(
+        advice,
+        [r"看多", r"偏多", r"买入", r"增持", r"看空", r"偏空", r"减仓", r"中性", r"观望", r"持有"],
+    )
+    confidence = extract_with_regex(advice, r"(?:研究)?置信度[^0-9]*(\d{1,3})")
+    trend_strength = extract_with_regex(advice, r"趋势强度[^0-9]*(\d{1,3})")
+    position_action = extract_with_patterns(advice, [r"加仓", r"减仓", r"持有", r"观望", r"买入", r"止盈", r"止损"])
+
+    parts = []
+    if direction:
+        parts.append(f"观点={direction}")
+    if confidence:
+        parts.append(f"置信度={confidence}/100")
+    if trend_strength:
+        parts.append(f"趋势强度={trend_strength}/100")
+    if position_action:
+        parts.append(f"仓位动作={position_action}")
+
+    if not parts:
+        first_line = next((line.strip("-• ") for line in advice.splitlines() if line.strip()), "信息不足")
+        first_line = re.sub(r"\s+", " ", first_line)
+        return f"{first_line[:70]}{'…' if len(first_line) > 70 else ''}"
+
+    return "；".join(parts)
+
+
+def extract_with_patterns(text: str, patterns: list[str]) -> str | None:
+    for pattern in patterns:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return pattern
+    return None
+
+
+def extract_with_regex(text: str, pattern: str) -> str | None:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def markdown_to_html(markdown_text: str) -> str:
