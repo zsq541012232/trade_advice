@@ -42,8 +42,10 @@ def test_build_user_prompt_contains_short_and_long_term_requirements():
         }
     ]
     prompt = adviser.build_user_prompt("AAPL", contexts)
-    assert "短线建议" in prompt
-    assert "长线建议" in prompt
+    assert "短线策略（1天~2周）" in prompt
+    assert "长线策略（3个月~3年）" in prompt
+    assert "情景分析" in prompt
+    assert "研究置信度" in prompt
     assert "AAPL" in prompt
     assert "https://example.com/news" in prompt
 
@@ -304,3 +306,19 @@ def test_nearest_open_trade_date_uses_cache(monkeypatch):
     assert first.isoformat() == "2026-03-03"
     assert second.isoformat() == "2026-03-03"
     assert _FakeAk.calls == 1
+
+
+def test_build_result_dict_uses_cached_research_result():
+    research = adviser.StockResearchResult(
+        stock_code="AAPL",
+        contexts=[{"title": "t1"}, {"title": "t2"}],
+        advice="建议内容",
+    )
+
+    result = adviser.build_result_dict(research)
+
+    assert result == {
+        "stock_code": "AAPL",
+        "search_context_count": 2,
+        "advice": "建议内容",
+    }
