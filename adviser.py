@@ -15,6 +15,7 @@ import textwrap
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from typing import Iterable, List
@@ -81,8 +82,8 @@ def load_config() -> Config:
         raise ValueError("环境变量 SMTP_PORT 必须是整数") from exc
 
     market_data_provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
-    if market_data_provider not in {"auto", "yahoo", "eastmoney"}:
-        raise ValueError("环境变量 MARKET_DATA_PROVIDER 仅支持 auto / yahoo / eastmoney")
+    if market_data_provider not in {"auto", "akshare", "yahoo", "eastmoney"}:
+        raise ValueError("环境变量 MARKET_DATA_PROVIDER 仅支持 auto / akshare / yahoo / eastmoney")
 
     return Config(
         aihubmix_api_key=api_key,
@@ -175,9 +176,15 @@ def build_queries(stock_code: str) -> List[str]:
     ]
 
     queries: List[str] = []
+    seen_query_keys: set[str] = set()
     for alias in aliases:
         for template in topic_templates:
-            queries.append(template.format(alias=alias))
+            query = template.format(alias=alias)
+            key = normalize_query_key(query)
+            if key in seen_query_keys:
+                continue
+            seen_query_keys.add(key)
+            queries.append(query)
 
     return queries
 
@@ -193,14 +200,28 @@ def stock_code_aliases(stock_code: str) -> List[str]:
     if code.isdigit() and len(code) == 6:
         if code.startswith("6"):
             aliases.append(f"{code}.SH")
-            aliases.append(f"SH{code}")
             aliases.append(f"上证{code}")
         else:
             aliases.append(f"{code}.SZ")
-            aliases.append(f"SZ{code}")
             aliases.append(f"深证{code}")
 
     return list(dict.fromkeys(aliases))
+
+
+def normalize_query_key(query: str) -> str:
+    """对 query 做语义归一化，避免 600900 与 sh600900 这类重复检索。"""
+    text = query.upper().strip()
+    replacements = {
+        "SH": "",
+        "SZ": "",
+        ".SH": "",
+        ".SZ": "",
+        "上证": "",
+        "深证": "",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return re.sub(r"\s+", " ", text)
 
 
 def search_with_retry(ddgs, query: str, region: str, max_results: int, max_retries: int = 3) -> List[dict]:
@@ -497,17 +518,37 @@ def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
     with smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, timeout=30) as smtp:
         smtp.login(config.sender_email, config.sender_auth_code)
         for receiver, stocks in config.email_stock_router.items():
-            body_lines = ["以下为今日股票分析：", ""]
+            html_sections: list[str] = []
+            plain_lines = ["以下为今日股票分析：", ""]
             for code in stocks:
                 advice = advice_by_stock.get(code)
                 if not advice:
                     continue
-                body_lines.extend([f"## {code}", advice, ""])
+                safe_advice = advice.replace("\n", "<br>")
+                html_sections.append(
+                    "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
+                    f"<h3 style='margin:0 0 8px 0;color:#111827;'>{code}</h3>"
+                    f"<div style='line-height:1.65;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
+                    "</section>"
+                )
+                plain_lines.extend([f"## {code}", advice, ""])
 
-            if len(body_lines) <= 2:
+            if not html_sections:
                 continue
 
-            message = MIMEText("\n".join(body_lines), "plain", "utf-8")
+            html_body = (
+                "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'>"
+                "<h2 style='margin:0 0 10px 0;color:#111827;'>📈 股票分析日报</h2>"
+                f"<p style='margin:0 0 14px 0;color:#6b7280;'>生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>"
+                + "".join(html_sections)
+                + "<p style='margin-top:16px;color:#6b7280;font-size:12px;'>"
+                "风险提示：以上内容仅供参考，不构成任何投资建议，请严格做好仓位与止损管理。"
+                "</p></body></html>"
+            )
+
+            message = MIMEMultipart("alternative")
+            message.attach(MIMEText("\n".join(plain_lines), "plain", "utf-8"))
+            message.attach(MIMEText(html_body, "html", "utf-8"))
             message["Subject"] = "股票分析日报"
             message["From"] = formataddr(("Stock Adviser", config.sender_email))
             message["To"] = receiver
@@ -518,12 +559,14 @@ def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
 def fetch_market_snapshot(stock_code: str, config: Config) -> dict | None:
     providers = [config.market_data_provider]
     if config.market_data_provider == "auto":
-        providers = ["yahoo", "eastmoney"] if not stock_code.isdigit() else ["eastmoney", "yahoo"]
+        providers = ["akshare", "eastmoney", "yahoo"] if stock_code.isdigit() else ["yahoo", "akshare", "eastmoney"]
 
     for provider in providers:
         try:
             if provider == "yahoo":
                 snapshot = fetch_market_snapshot_from_yahoo(stock_code)
+            elif provider == "akshare":
+                snapshot = fetch_market_snapshot_from_akshare(stock_code)
             else:
                 snapshot = fetch_market_snapshot_from_eastmoney(stock_code)
         except Exception as exc:
@@ -539,6 +582,7 @@ def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
     import requests
 
     symbol = to_yahoo_symbol(stock_code)
+    target_trade_date = nearest_open_trade_date()
     quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
     quote_resp = requests.get(quote_url, timeout=20)
     quote_resp.raise_for_status()
@@ -554,17 +598,81 @@ def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
     if not chart_result:
         return None
 
-    closes = [v for v in chart_result[0].get("indicators", {}).get("quote", [{}])[0].get("close", []) if isinstance(v, (int, float))]
+    chart = chart_result[0]
+    timestamps = chart.get("timestamp", [])
+    raw_closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    closes: list[float] = []
+    selected_price = None
+    selected_timestamp = None
+    for ts, close in zip(timestamps, raw_closes):
+        if not isinstance(close, (int, float)):
+            continue
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        if dt.date() <= target_trade_date:
+            closes.append(float(close))
+            selected_price = float(close)
+            selected_timestamp = dt.isoformat()
+
+    if not closes:
+        closes = [v for v in raw_closes if isinstance(v, (int, float))]
     indicators = calculate_indicators(closes)
 
     return {
         "provider": "yahoo",
         "symbol": symbol,
-        "price": quote.get("regularMarketPrice"),
+        "price": selected_price or quote.get("regularMarketPrice"),
         "change_percent": quote.get("regularMarketChangePercent"),
-        "timestamp": quote.get("regularMarketTime"),
-        "date": datetime.now(timezone.utc).date().isoformat(),
+        "timestamp": selected_timestamp or quote.get("regularMarketTime"),
+        "date": target_trade_date.isoformat(),
         "source_url": f"https://finance.yahoo.com/quote/{symbol}",
+        "trade_date": target_trade_date.isoformat(),
+        **indicators,
+    }
+
+
+def fetch_market_snapshot_from_akshare(stock_code: str) -> dict | None:
+    import akshare as ak
+
+    if not stock_code.isdigit() or len(stock_code) != 6:
+        return None
+
+    target_trade_date = nearest_open_trade_date()
+    end_date = target_trade_date.strftime("%Y%m%d")
+    start_date = (target_trade_date - timedelta(days=240)).strftime("%Y%m%d")
+
+    df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+    if df is None or df.empty:
+        return None
+
+    if "日期" not in df.columns or "收盘" not in df.columns:
+        return None
+
+    df = df.copy()
+    df["日期"] = df["日期"].astype(str)
+    target_str = target_trade_date.strftime("%Y-%m-%d")
+    df = df[df["日期"] <= target_str]
+    if df.empty:
+        return None
+
+    closes: list[float] = []
+    for value in df["收盘"].tolist():
+        parsed = safe_float(value)
+        if parsed is not None:
+            closes.append(parsed)
+    if not closes:
+        return None
+
+    last_row = df.iloc[-1]
+    indicators = calculate_indicators(closes)
+    return {
+        "provider": "akshare",
+        "symbol": stock_code,
+        "price": float(last_row["收盘"]),
+        "change_percent": safe_float(last_row.get("涨跌幅")),
+        "timestamp": f"{last_row['日期']}T15:00:00+08:00",
+        "date": last_row["日期"],
+        "trade_date": target_trade_date.isoformat(),
+        "source_url": f"https://quote.eastmoney.com/{stock_code}.html",
         **indicators,
     }
 
@@ -731,6 +839,43 @@ def safe_divide(value, denominator: float) -> float | None:
         return float(value) / denominator
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+
+
+def safe_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def nearest_open_trade_date(now: datetime | None = None) -> datetime.date:
+    current = now or datetime.now(timezone.utc)
+    local_today = (current + timedelta(hours=8)).date()
+    # 回退逻辑：周末自动退到最近工作日
+    fallback = local_today
+    while fallback.weekday() >= 5:
+        fallback -= timedelta(days=1)
+
+    try:
+        import akshare as ak
+
+        calendar_df = ak.tool_trade_date_hist_sina()
+        if calendar_df is None or calendar_df.empty or "trade_date" not in calendar_df.columns:
+            return fallback
+
+        trade_dates = []
+        for raw in calendar_df["trade_date"].tolist():
+            dt = parse_datetime(str(raw))
+            if dt:
+                trade_dates.append(dt.date())
+        if not trade_dates:
+            return fallback
+        available = [d for d in trade_dates if d <= local_today]
+        return max(available) if available else fallback
+    except Exception:
+        return fallback
 
 
 def format_market_snapshot(snapshot: dict) -> str:
