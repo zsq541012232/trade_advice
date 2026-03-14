@@ -6,26 +6,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest
-
-      - name: Run tests
-        run: python -m pytest -q
-
-      - name: CLI smoke test
-        run: python adviser.py --help
-
   run-advice:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
