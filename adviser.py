@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import math
 import os
@@ -19,6 +20,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from typing import Iterable, List
+
+
+_TRADE_DATE_CACHE: dict[str, object] = {"date": None, "value": None}
 
 
 
@@ -524,7 +528,7 @@ def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
                 advice = advice_by_stock.get(code)
                 if not advice:
                     continue
-                safe_advice = advice.replace("\n", "<br>")
+                safe_advice = markdown_to_html(advice)
                 html_sections.append(
                     "<section style='margin:14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;'>"
                     f"<h3 style='margin:0 0 8px 0;color:#111827;'>{code}</h3>"
@@ -554,6 +558,60 @@ def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
             message["To"] = receiver
             smtp.sendmail(config.sender_email, [receiver], message.as_string())
             print(f"[进度] 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
+
+
+def markdown_to_html(markdown_text: str) -> str:
+    """轻量 Markdown 转 HTML，避免邮件客户端把 Markdown 当纯文本显示。"""
+    if not markdown_text.strip():
+        return "<p>（无内容）</p>"
+
+    lines = markdown_text.splitlines()
+    blocks: list[str] = []
+    in_list = False
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            if in_list:
+                blocks.append("</ul>")
+                in_list = False
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading_match:
+            if in_list:
+                blocks.append("</ul>")
+                in_list = False
+            level = min(4, len(heading_match.group(1)) + 1)
+            content = apply_inline_markdown(heading_match.group(2))
+            blocks.append(f"<h{level} style='margin:10px 0 6px 0;'>{content}</h{level}>")
+            continue
+
+        list_match = re.match(r"^[-*]\s+(.+)$", line)
+        if list_match:
+            if not in_list:
+                blocks.append("<ul style='margin:6px 0 8px 20px;padding:0;'>")
+                in_list = True
+            blocks.append(f"<li style='margin:2px 0;'>{apply_inline_markdown(list_match.group(1))}</li>")
+            continue
+
+        if in_list:
+            blocks.append("</ul>")
+            in_list = False
+        blocks.append(f"<p style='margin:6px 0;'>{apply_inline_markdown(line)}</p>")
+
+    if in_list:
+        blocks.append("</ul>")
+
+    return "".join(blocks)
+
+
+def apply_inline_markdown(text: str) -> str:
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"`([^`]+)`", r"<code style='background:#f3f4f6;padding:0 4px;border-radius:4px;'>\1</code>", escaped)
+    escaped = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"<a href='\2'>\1</a>", escaped)
+    return escaped
 
 
 def fetch_market_snapshot(stock_code: str, config: Config) -> dict | None:
@@ -640,7 +698,28 @@ def fetch_market_snapshot_from_akshare(stock_code: str) -> dict | None:
     end_date = target_trade_date.strftime("%Y%m%d")
     start_date = (target_trade_date - timedelta(days=240)).strftime("%Y%m%d")
 
-    df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+    df = None
+    last_exception = None
+    for adjust in ["qfq", ""]:
+        for attempt in range(1, 4):
+            try:
+                df = ak.stock_zh_a_hist(
+                    symbol=stock_code,
+                    period="daily",
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                )
+                if df is not None and not df.empty:
+                    break
+            except Exception as exc:
+                last_exception = exc
+                time.sleep(0.8 * attempt)
+        if df is not None and not df.empty:
+            break
+
+    if (df is None or df.empty) and last_exception is not None:
+        print(f"[进度] {stock_code}: akshare 历史行情重试后仍失败: {last_exception}")
     if df is None or df.empty:
         return None
 
@@ -858,11 +937,16 @@ def nearest_open_trade_date(now: datetime | None = None) -> datetime.date:
     while fallback.weekday() >= 5:
         fallback -= timedelta(days=1)
 
+    if _TRADE_DATE_CACHE.get("date") == local_today and _TRADE_DATE_CACHE.get("value"):
+        return _TRADE_DATE_CACHE["value"]  # type: ignore[return-value]
+
     try:
         import akshare as ak
 
         calendar_df = ak.tool_trade_date_hist_sina()
         if calendar_df is None or calendar_df.empty or "trade_date" not in calendar_df.columns:
+            _TRADE_DATE_CACHE["date"] = local_today
+            _TRADE_DATE_CACHE["value"] = fallback
             return fallback
 
         trade_dates = []
@@ -871,10 +955,17 @@ def nearest_open_trade_date(now: datetime | None = None) -> datetime.date:
             if dt:
                 trade_dates.append(dt.date())
         if not trade_dates:
+            _TRADE_DATE_CACHE["date"] = local_today
+            _TRADE_DATE_CACHE["value"] = fallback
             return fallback
         available = [d for d in trade_dates if d <= local_today]
-        return max(available) if available else fallback
+        resolved = max(available) if available else fallback
+        _TRADE_DATE_CACHE["date"] = local_today
+        _TRADE_DATE_CACHE["value"] = resolved
+        return resolved
     except Exception:
+        _TRADE_DATE_CACHE["date"] = local_today
+        _TRADE_DATE_CACHE["value"] = fallback
         return fallback
 
 

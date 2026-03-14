@@ -249,3 +249,58 @@ def test_calculate_indicators_returns_none_for_short_series():
     assert indicators["rsi14"] is None
     assert indicators["macd"] is None
     assert indicators["kdj_k"] is None
+
+
+def test_markdown_to_html_supports_headings_lists_and_links():
+    markdown = """## 标题
+
+- **买入** 条件
+- 关注 [公告](https://example.com)
+
+`代码块`"""
+    html = adviser.markdown_to_html(markdown)
+    assert "<h3" in html
+    assert "<ul" in html and "<li" in html
+    assert "<strong>买入</strong>" in html
+    assert "<a href='https://example.com'>公告</a>" in html
+    assert "<code" in html
+
+
+def test_nearest_open_trade_date_uses_cache(monkeypatch):
+    from datetime import datetime, timezone
+
+    adviser._TRADE_DATE_CACHE["date"] = None
+    adviser._TRADE_DATE_CACHE["value"] = None
+
+    class _FakeAk:
+        calls = 0
+
+        @staticmethod
+        def tool_trade_date_hist_sina():
+            _FakeAk.calls += 1
+            class _DF:
+                empty = False
+                columns = ["trade_date"]
+                def __getitem__(self, key):
+                    class _Series:
+                        def tolist(self):
+                            return ["2026-03-02", "2026-03-03"]
+                    return _Series()
+            return _DF()
+
+    import builtins
+    orig_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "akshare":
+            return _FakeAk
+        return orig_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    now = datetime(2026, 3, 3, 3, 0, tzinfo=timezone.utc)
+    first = adviser.nearest_open_trade_date(now)
+    second = adviser.nearest_open_trade_date(now)
+
+    assert first.isoformat() == "2026-03-03"
+    assert second.isoformat() == "2026-03-03"
+    assert _FakeAk.calls == 1
