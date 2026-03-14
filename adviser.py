@@ -228,14 +228,18 @@ def normalize_base_url(raw_base_url: str) -> str:
     )
 
 
-def build_queries(stock_code: str) -> List[str]:
+def build_queries(stock_code: str, adaptive_topics: list[str] | None = None) -> List[str]:
     aliases = stock_code_aliases(stock_code)
     topic_templates = [
         "{alias} 股票 最新消息",
         "{alias} 财报 业绩 指引",
         "{alias} 股价 分析 技术指标",
-        "{alias} 银行业 宏观政策 影响",
     ]
+
+    if adaptive_topics:
+        deduped_topics = list(dict.fromkeys(topic.strip() for topic in adaptive_topics if topic.strip()))
+        for topic in deduped_topics[:3]:
+            topic_templates.append(f"{{alias}} {topic} 行业政策 影响")
 
     queries: List[str] = []
     seen_query_keys: set[str] = set()
@@ -320,13 +324,10 @@ def search_context_chain(stock_code: str, max_results: int, region: str, depth: 
     """多轮检索：上一轮热点词会驱动下一轮 query，实现 chain of search。"""
     combined: list[dict] = []
     seen_urls: set[str] = set()
-    frontier = [stock_code]
+    frontier_topics: list[str] = []
 
     for round_idx in range(1, depth + 1):
-        round_queries: list[str] = []
-        for seed in frontier:
-            round_queries.extend(build_queries(seed))
-        round_queries = list(dict.fromkeys(round_queries))
+        round_queries = build_queries(stock_code, adaptive_topics=frontier_topics)
 
         realtime_print(f"[进度] {stock_code}: chain-of-search 第 {round_idx}/{depth} 轮，query 数={len(round_queries)}")
         round_results = search_context_via_queries(stock_code, round_queries, max_results, region)
@@ -338,8 +339,8 @@ def search_context_chain(stock_code: str, max_results: int, region: str, depth: 
                 seen_urls.add(href)
             combined.append(hit)
 
-        frontier = extract_followup_topics(round_results, stock_code)
-        if not frontier:
+        frontier_topics = extract_followup_topics(round_results, stock_code)
+        if not frontier_topics:
             break
 
     return combined

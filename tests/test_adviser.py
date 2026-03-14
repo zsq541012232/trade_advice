@@ -25,11 +25,17 @@ class _FakeRequests:
 
 def test_build_queries_contains_expected_sections():
     queries = adviser.build_queries("AAPL")
-    assert len(queries) == 4
+    assert len(queries) == 3
     assert "最新消息" in queries[0]
     assert "财报" in queries[1]
     assert "技术指标" in queries[2]
-    assert "宏观政策" in queries[3]
+
+
+def test_build_queries_accepts_adaptive_topics():
+    queries = adviser.build_queries("AAPL", adaptive_topics=["半导体", "AI", "AI", " "])
+    assert len(queries) == 5
+    assert "AAPL 半导体 行业政策 影响" in queries
+    assert "AAPL AI 行业政策 影响" in queries
 
 
 def test_build_user_prompt_contains_short_and_long_term_requirements():
@@ -173,10 +179,10 @@ def test_stock_code_aliases_for_shanghai_code():
 
 def test_build_queries_expands_aliases_for_a_share_code():
     queries = adviser.build_queries("600900")
-    assert len(queries) == 8
+    assert len(queries) == 6
     assert "600900 股票 最新消息" in queries
     assert "600900.SH 财报 业绩 指引" in queries
-    assert "600900 银行业 宏观政策 影响" in queries
+    assert "600900 股价 分析 技术指标" in queries
 
 
 def test_normalize_query_key_dedup_semantic_aliases():
