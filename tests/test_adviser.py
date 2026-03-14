@@ -25,7 +25,7 @@ class _FakeRequests:
 
 def test_build_queries_contains_expected_sections():
     queries = adviser.build_queries("AAPL")
-    assert len(queries) == 3
+    assert len(queries) == 5
     assert "最新消息" in queries[0]
     assert "财报" in queries[1]
     assert "技术指标" in queries[2]
@@ -33,7 +33,7 @@ def test_build_queries_contains_expected_sections():
 
 def test_build_queries_accepts_adaptive_topics():
     queries = adviser.build_queries("AAPL", adaptive_topics=["半导体", "AI", "AI", " "])
-    assert len(queries) == 5
+    assert len(queries) == 7
     assert "AAPL 半导体 行业政策 影响" in queries
     assert "AAPL AI 行业政策 影响" in queries
 
@@ -179,7 +179,7 @@ def test_stock_code_aliases_for_shanghai_code():
 
 def test_build_queries_expands_aliases_for_a_share_code():
     queries = adviser.build_queries("600900")
-    assert len(queries) == 6
+    assert len(queries) == 10
     assert "600900 股票 最新消息" in queries
     assert "600900.SH 财报 业绩 指引" in queries
     assert "600900 股价 分析 技术指标" in queries
@@ -454,3 +454,20 @@ def test_build_email_message_lists_summary_before_details():
     assert "快速摘要" in html_body
     assert "AAPL（苹果）" in html_body
     assert html_body.index("观点=中性；置信度=70/100") < html_body.index("详细分析正文")
+
+
+def test_build_queries_contains_global_macro_topics():
+    queries = adviser.build_queries("AAPL")
+    assert any("海外新闻" in q for q in queries)
+    assert any("全球市场" in q for q in queries)
+
+
+def test_temporary_search_proxy_env_sets_proxy(monkeypatch):
+    monkeypatch.setenv("SEARCH_USE_VPN", "true")
+    monkeypatch.setenv("CLASH_SUBSCRIPTION_URL", "https://example.com/clash-sub")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+
+    with adviser.temporary_search_proxy_env("AAPL"):
+        assert "127.0.0.1:7890" in (adviser.os.environ.get("HTTP_PROXY") or "")
+
+    assert adviser.os.environ.get("HTTP_PROXY") is None
