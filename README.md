@@ -35,6 +35,8 @@ cp .env.example .env
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
 - `DUCKDUCKGO_REGION`（默认 `cn-zh`）
 
+> A 股代码建议优先写纯数字（如 `600900`、`000001`）。脚本会自动扩展为 `600900.SH` / `SH600900` 等别名提高检索命中率。
+
 ## 3. 本地运行
 
 ```bash
@@ -84,3 +86,5 @@ python adviser.py --pretty-json
 - 止损/风控
 - 关键依据
 - 风险提示
+
+运行过程中会打印进度日志（检索阶段、每条 query 命中数量、AI 生成阶段），方便快速定位“无检索结果”的原因。

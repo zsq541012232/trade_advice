@@ -151,3 +151,16 @@ def test_resolve_model_falls_back_to_preferred_candidate_when_missing():
     model = adviser.resolve_model(config, req)
 
     assert model == "deepseek-v3"
+
+
+def test_stock_code_aliases_for_shanghai_code():
+    aliases = adviser.stock_code_aliases("600900")
+    assert aliases == ["600900", "600900.SH", "SH600900", "上证600900"]
+
+
+def test_build_queries_expands_aliases_for_a_share_code():
+    queries = adviser.build_queries("600900")
+    assert len(queries) == 12
+    assert "600900 新闻 舆情 最新" in queries
+    assert "600900.SH 财报 业绩 指引" in queries
+    assert "SH600900 股价 技术指标 成交量 RSI MACD" in queries

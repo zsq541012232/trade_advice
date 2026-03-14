@@ -85,11 +85,40 @@ def normalize_base_url(raw_base_url: str) -> str:
 
 
 def build_queries(stock_code: str) -> List[str]:
-    return [
-        f"{stock_code} 新闻 舆情 最新",
-        f"{stock_code} 财报 业绩 指引",
-        f"{stock_code} 股价 技术指标 成交量 RSI MACD",
+    aliases = stock_code_aliases(stock_code)
+    topic_templates = [
+        "{alias} 新闻 舆情 最新",
+        "{alias} 财报 业绩 指引",
+        "{alias} 股价 技术指标 成交量 RSI MACD",
     ]
+
+    queries: List[str] = []
+    for alias in aliases:
+        for template in topic_templates:
+            queries.append(template.format(alias=alias))
+
+    return queries
+
+
+def stock_code_aliases(stock_code: str) -> List[str]:
+    """给同一股票代码构造多个常见别名，提升检索命中率。"""
+    code = stock_code.strip().upper()
+    if not code:
+        return []
+
+    aliases = [code]
+
+    if code.isdigit() and len(code) == 6:
+        if code.startswith("6"):
+            aliases.append(f"{code}.SH")
+            aliases.append(f"SH{code}")
+            aliases.append(f"上证{code}")
+        else:
+            aliases.append(f"{code}.SZ")
+            aliases.append(f"SZ{code}")
+            aliases.append(f"深证{code}")
+
+    return list(dict.fromkeys(aliases))
 
 
 def search_context(stock_code: str, max_results: int, region: str) -> List[dict]:
@@ -99,15 +128,21 @@ def search_context(stock_code: str, max_results: int, region: str) -> List[dict]
     except ImportError:
         from duckduckgo_search import DDGS
 
+    queries = build_queries(stock_code)
+    print(f"[进度] {stock_code}: 开始检索，共 {len(queries)} 条查询，区域={region}")
+
     with DDGS() as ddgs:
-        for query in build_queries(stock_code):
+        for idx, query in enumerate(queries, start=1):
+            print(f"[进度] {stock_code}: 检索 {idx}/{len(queries)} -> {query}")
             hits: Iterable[dict] = ddgs.text(
                 query,
                 region=region,
                 max_results=max_results,
                 safesearch="off",
             )
+            query_count = 0
             for hit in hits:
+                query_count += 1
                 results.append(
                     {
                         "query": query,
@@ -116,6 +151,29 @@ def search_context(stock_code: str, max_results: int, region: str) -> List[dict]
                         "body": hit.get("body", ""),
                     }
                 )
+            print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
+
+    if not results:
+        print(f"[进度] {stock_code}: 主区域无结果，尝试使用全球区域兜底（wt-wt）")
+        with DDGS() as ddgs:
+            for query in queries:
+                hits: Iterable[dict] = ddgs.text(
+                    query,
+                    region="wt-wt",
+                    max_results=max_results,
+                    safesearch="off",
+                )
+                for hit in hits:
+                    results.append(
+                        {
+                            "query": query,
+                            "title": hit.get("title", ""),
+                            "href": hit.get("href", ""),
+                            "body": hit.get("body", ""),
+                        }
+                    )
+
+    print(f"[进度] {stock_code}: 检索完成，共收集 {len(results)} 条")
     return results
 
 
@@ -238,12 +296,16 @@ def run() -> None:
     args = parser.parse_args()
 
     config = load_config()
+    print(f"[进度] 已加载配置，共 {len(config.stock_codes)} 只股票待分析")
 
     final_results = []
-    for code in config.stock_codes:
-        print(f"\n========== {code} ==========")
+    total = len(config.stock_codes)
+    for index, code in enumerate(config.stock_codes, start=1):
+        print(f"\n========== {code} ({index}/{total}) ==========")
         contexts = search_context(code, config.max_search_results, config.search_region)
+        print(f"[进度] {code}: 开始请求 AI 生成建议")
         advice = request_ai_advice(config, code, contexts)
+        print(f"[进度] {code}: AI 建议生成完成")
         print(advice)
         final_results.append(
             {
