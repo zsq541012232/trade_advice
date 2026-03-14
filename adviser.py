@@ -878,9 +878,10 @@ def extract_html_body(message: MIMEMultipart) -> str:
     return ""
 
 def build_result_dict(research: StockResearchResult) -> dict:
+    normalized_stock_name = (research.stock_name or "").strip() or research.stock_code
     return {
         "stock_code": research.stock_code,
-        "stock_name": research.stock_name,
+        "stock_name": normalized_stock_name,
         "search_context_count": len(research.contexts),
         "brief_summary": research.brief_summary,
         "advice": research.advice,
