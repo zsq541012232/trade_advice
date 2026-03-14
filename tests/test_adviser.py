@@ -25,10 +25,11 @@ class _FakeRequests:
 
 def test_build_queries_contains_expected_sections():
     queries = adviser.build_queries("AAPL")
-    assert len(queries) == 3
+    assert len(queries) == 4
     assert "最新消息" in queries[0]
     assert "财报" in queries[1]
     assert "技术指标" in queries[2]
+    assert "宏观政策" in queries[3]
 
 
 def test_build_user_prompt_contains_short_and_long_term_requirements():
@@ -160,10 +161,11 @@ def test_stock_code_aliases_for_shanghai_code():
 
 def test_build_queries_expands_aliases_for_a_share_code():
     queries = adviser.build_queries("600900")
-    assert len(queries) == 12
+    assert len(queries) == 16
     assert "600900 股票 最新消息" in queries
     assert "600900.SH 财报 业绩 指引" in queries
     assert "SH600900 股价 分析 技术指标" in queries
+    assert "上证600900 银行业 宏观政策 影响" in queries
 
 
 def test_parse_email_stock_router():
@@ -208,3 +210,28 @@ def test_within_last_3_months():
     old = datetime.now(timezone.utc) - timedelta(days=150)
     assert adviser.within_last_3_months(recent) is True
     assert adviser.within_last_3_months(old) is False
+
+
+def test_to_yahoo_symbol_for_a_share():
+    assert adviser.to_yahoo_symbol("600900") == "600900.SS"
+    assert adviser.to_yahoo_symbol("000001") == "000001.SZ"
+
+
+def test_to_eastmoney_secid_for_a_share():
+    assert adviser.to_eastmoney_secid("600900") == ("1.600900", "600900")
+    assert adviser.to_eastmoney_secid("000001") == ("0.000001", "000001")
+
+
+def test_calculate_indicators_returns_values_for_enough_data():
+    closes = [10 + i * 0.1 for i in range(100)]
+    indicators = adviser.calculate_indicators(closes)
+    assert indicators["rsi14"] is not None
+    assert indicators["macd"] is not None
+    assert indicators["kdj_k"] is not None
+
+
+def test_calculate_indicators_returns_none_for_short_series():
+    indicators = adviser.calculate_indicators([1.0, 1.1, 1.2])
+    assert indicators["rsi14"] is None
+    assert indicators["macd"] is None
+    assert indicators["kdj_k"] is None

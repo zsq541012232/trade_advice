@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -33,6 +34,7 @@ class Config:
     sender_auth_code: str | None = None
     smtp_host: str = ""
     smtp_port: int = 465
+    market_data_provider: str = "auto"
 
 
 def load_config() -> Config:
@@ -78,6 +80,10 @@ def load_config() -> Config:
     except ValueError as exc:
         raise ValueError("环境变量 SMTP_PORT 必须是整数") from exc
 
+    market_data_provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
+    if market_data_provider not in {"auto", "yahoo", "eastmoney"}:
+        raise ValueError("环境变量 MARKET_DATA_PROVIDER 仅支持 auto / yahoo / eastmoney")
+
     return Config(
         aihubmix_api_key=api_key,
         aihubmix_base_url=base_url.rstrip("/"),
@@ -90,6 +96,7 @@ def load_config() -> Config:
         sender_auth_code=sender_auth_code,
         smtp_host=smtp_host,
         smtp_port=smtp_port,
+        market_data_provider=market_data_provider,
     )
 
 
@@ -164,6 +171,7 @@ def build_queries(stock_code: str) -> List[str]:
         "{alias} 股票 最新消息",
         "{alias} 财报 业绩 指引",
         "{alias} 股价 分析 技术指标",
+        "{alias} 银行业 宏观政策 影响",
     ]
 
     queries: List[str] = []
@@ -312,6 +320,7 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
                 "content": (
                     "你是专业证券投研助手。你只能根据用户提供的信息做出审慎分析，"
                     "输出操作建议时必须同时给出风险管理建议。"
+                    "如果提供了结构化行情/指标快照，你要优先使用这些数据进行技术面分析。"
                 ),
             },
             {"role": "user", "content": build_user_prompt(stock_code, contexts)},
@@ -394,7 +403,19 @@ def run() -> None:
     total = len(config.stock_codes)
     for index, code in enumerate(config.stock_codes, start=1):
         print(f"\n========== {code} ({index}/{total}) ==========")
+        market_snapshot = fetch_market_snapshot(code, config)
+        if market_snapshot:
+            print(f"[进度] {code}: 行情源={market_snapshot.get('provider')} 时间={market_snapshot.get('timestamp')}")
         contexts = search_context(code, config.max_search_results, config.search_region)
+        if market_snapshot:
+            contexts.insert(0, {
+                "query": f"{code} 实时行情技术指标",
+                "region": "direct-api",
+                "title": f"{code} 最新价格与技术指标（{market_snapshot.get('provider')}）",
+                "href": market_snapshot.get("source_url", ""),
+                "body": format_market_snapshot(market_snapshot),
+                "published_at": market_snapshot.get("date", "unknown"),
+            })
         print(f"[进度] {code}: 开始请求 AI 生成建议")
         advice = request_ai_advice(config, code, contexts)
         print(f"[进度] {code}: AI 建议生成完成")
@@ -492,6 +513,237 @@ def send_group_emails(config: Config, advice_by_stock: dict[str, str]) -> None:
             message["To"] = receiver
             smtp.sendmail(config.sender_email, [receiver], message.as_string())
             print(f"[进度] 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
+
+
+def fetch_market_snapshot(stock_code: str, config: Config) -> dict | None:
+    providers = [config.market_data_provider]
+    if config.market_data_provider == "auto":
+        providers = ["yahoo", "eastmoney"] if not stock_code.isdigit() else ["eastmoney", "yahoo"]
+
+    for provider in providers:
+        try:
+            if provider == "yahoo":
+                snapshot = fetch_market_snapshot_from_yahoo(stock_code)
+            else:
+                snapshot = fetch_market_snapshot_from_eastmoney(stock_code)
+        except Exception as exc:
+            print(f"[进度] {stock_code}: {provider} 行情抓取失败: {exc}")
+            snapshot = None
+
+        if snapshot:
+            return snapshot
+    return None
+
+
+def fetch_market_snapshot_from_yahoo(stock_code: str) -> dict | None:
+    import requests
+
+    symbol = to_yahoo_symbol(stock_code)
+    quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
+    quote_resp = requests.get(quote_url, timeout=20)
+    quote_resp.raise_for_status()
+    quote_results = quote_resp.json().get("quoteResponse", {}).get("result", [])
+    if not quote_results:
+        return None
+    quote = quote_results[0]
+
+    chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=6mo&interval=1d"
+    chart_resp = requests.get(chart_url, timeout=20)
+    chart_resp.raise_for_status()
+    chart_result = chart_resp.json().get("chart", {}).get("result", [])
+    if not chart_result:
+        return None
+
+    closes = [v for v in chart_result[0].get("indicators", {}).get("quote", [{}])[0].get("close", []) if isinstance(v, (int, float))]
+    indicators = calculate_indicators(closes)
+
+    return {
+        "provider": "yahoo",
+        "symbol": symbol,
+        "price": quote.get("regularMarketPrice"),
+        "change_percent": quote.get("regularMarketChangePercent"),
+        "timestamp": quote.get("regularMarketTime"),
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "source_url": f"https://finance.yahoo.com/quote/{symbol}",
+        **indicators,
+    }
+
+
+def fetch_market_snapshot_from_eastmoney(stock_code: str) -> dict | None:
+    import requests
+
+    secid, symbol = to_eastmoney_secid(stock_code)
+    quote_url = (
+        "https://push2.eastmoney.com/api/qt/stock/get?"
+        f"secid={secid}&fields=f43,f44,f45,f46,f47,f48,f49,f57,f58,f60,f169,f170"
+    )
+    quote_resp = requests.get(quote_url, timeout=20)
+    quote_resp.raise_for_status()
+    data = quote_resp.json().get("data")
+    if not data:
+        return None
+
+    kline_url = (
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+        f"secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
+        "&klt=101&fqt=1&lmt=180"
+    )
+    kline_resp = requests.get(kline_url, timeout=20)
+    kline_resp.raise_for_status()
+    klines = kline_resp.json().get("data", {}).get("klines", [])
+
+    closes: list[float] = []
+    for row in klines:
+        parts = row.split(",")
+        if len(parts) < 3:
+            continue
+        try:
+            closes.append(float(parts[2]))
+        except ValueError:
+            continue
+    indicators = calculate_indicators(closes)
+    price = safe_divide(data.get("f43"), 100)
+    change_percent = safe_divide(data.get("f170"), 100)
+
+    return {
+        "provider": "eastmoney",
+        "symbol": symbol,
+        "price": price,
+        "change_percent": change_percent,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "source_url": f"https://quote.eastmoney.com/{symbol}.html",
+        **indicators,
+    }
+
+
+def to_yahoo_symbol(stock_code: str) -> str:
+    code = stock_code.strip().upper()
+    if "." in code:
+        return code
+    if code.isdigit() and len(code) == 6:
+        suffix = "SS" if code.startswith("6") else "SZ"
+        return f"{code}.{suffix}"
+    return code
+
+
+def to_eastmoney_secid(stock_code: str) -> tuple[str, str]:
+    code = stock_code.strip().upper()
+    if code.isdigit() and len(code) == 6:
+        market = "1" if code.startswith("6") else "0"
+        return f"{market}.{code}", code
+    yahoo = to_yahoo_symbol(code)
+    if yahoo.endswith(".SS"):
+        raw = yahoo.replace(".SS", "")
+        return f"1.{raw}", raw
+    if yahoo.endswith(".SZ"):
+        raw = yahoo.replace(".SZ", "")
+        return f"0.{raw}", raw
+    raise ValueError("东方财富接口暂仅支持 A 股 6 位代码")
+
+
+def calculate_indicators(closes: list[float]) -> dict:
+    if len(closes) < 35:
+        return {"rsi14": None, "macd": None, "macd_signal": None, "macd_hist": None, "kdj_k": None, "kdj_d": None, "kdj_j": None}
+
+    rsi = calculate_rsi(closes, period=14)
+    macd, signal, hist = calculate_macd(closes)
+    k, d, j = calculate_kdj(closes, period=9)
+    return {
+        "rsi14": round(rsi, 2) if rsi is not None else None,
+        "macd": round(macd, 4) if macd is not None else None,
+        "macd_signal": round(signal, 4) if signal is not None else None,
+        "macd_hist": round(hist, 4) if hist is not None else None,
+        "kdj_k": round(k, 2) if k is not None else None,
+        "kdj_d": round(d, 2) if d is not None else None,
+        "kdj_j": round(j, 2) if j is not None else None,
+    }
+
+
+def calculate_rsi(values: list[float], period: int = 14) -> float | None:
+    if len(values) <= period:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, period + 1):
+        diff = values[i] - values[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
+
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(period + 1, len(values)):
+        diff = values[i] - values[i - 1]
+        gain = max(diff, 0)
+        loss = abs(min(diff, 0))
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def calculate_macd(values: list[float], short: int = 12, long: int = 26, signal_period: int = 9) -> tuple[float | None, float | None, float | None]:
+    if len(values) < long + signal_period:
+        return None, None, None
+    ema_short = ema_series(values, short)
+    ema_long = ema_series(values, long)
+    macd_line = [s - l for s, l in zip(ema_short, ema_long)]
+    signal_line = ema_series(macd_line, signal_period)
+    macd = macd_line[-1]
+    signal = signal_line[-1]
+    return macd, signal, macd - signal
+
+
+def calculate_kdj(values: list[float], period: int = 9) -> tuple[float | None, float | None, float | None]:
+    if len(values) < period:
+        return None, None, None
+    k = 50.0
+    d = 50.0
+    for i in range(period - 1, len(values)):
+        window = values[i - period + 1 : i + 1]
+        high_n = max(window)
+        low_n = min(window)
+        close = values[i]
+        rsv = 50.0 if math.isclose(high_n, low_n) else (close - low_n) / (high_n - low_n) * 100
+        k = (2 / 3) * k + (1 / 3) * rsv
+        d = (2 / 3) * d + (1 / 3) * k
+    j = 3 * k - 2 * d
+    return k, d, j
+
+
+def ema_series(values: list[float], period: int) -> list[float]:
+    multiplier = 2 / (period + 1)
+    ema = []
+    current = values[0]
+    for value in values:
+        current = (value - current) * multiplier + current
+        ema.append(current)
+    return ema
+
+
+def safe_divide(value, denominator: float) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value) / denominator
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def format_market_snapshot(snapshot: dict) -> str:
+    return (
+        "最新行情快照: "
+        f"symbol={snapshot.get('symbol')}, "
+        f"price={snapshot.get('price')}, "
+        f"change_percent={snapshot.get('change_percent')}, "
+        f"RSI14={snapshot.get('rsi14')}, "
+        f"MACD={snapshot.get('macd')}, signal={snapshot.get('macd_signal')}, hist={snapshot.get('macd_hist')}, "
+        f"KDJ(K,D,J)=({snapshot.get('kdj_k')},{snapshot.get('kdj_d')},{snapshot.get('kdj_j')}), "
+        f"timestamp={snapshot.get('timestamp')}"
+    )
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ cp .env.example .env
 - `AIHUBMIX_MODEL`（默认 `gpt-4o-mini`）
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
 - `DUCKDUCKGO_REGION`（默认 `zh-cn`）
+- `MARKET_DATA_PROVIDER`（默认 `auto`，可选 `yahoo` / `eastmoney`）
 - `EMAIL_STOCK_ROUTER`（例如 `a@xx.com:AAPL,TSLA;b@xx.com:MSFT`，用于按邮箱分组发送）
 - `SENDER_EMAIL`（发送邮箱）
 - `SENDER_AUTH_CODE`（发送邮箱授权码）
@@ -56,6 +57,16 @@ cp .env.example .env
 ```bash
 EMAIL_STOCK_ROUTER="a@example.com:AAPL,TSLA;d@example.com:MSFT,NVDA"
 ```
+
+## 最新价格/技术指标来源
+
+仅依赖 DuckDuckGo 容易出现“只有新闻、缺少实时技术指标”的问题。脚本现已增加直连行情源：
+
+- `Yahoo Finance`：适合美股及常见国际代码，也支持 `600900.SS` / `000001.SZ` 这类 A 股后缀代码。
+- `东方财富`：适合 A 股 6 位代码，自动拉取日线并本地计算 `RSI14`、`MACD`、`KDJ`。
+- 默认 `MARKET_DATA_PROVIDER=auto`：A 股优先东方财富，其它代码优先 Yahoo。
+
+这些结构化指标会注入到 AI 提示词中，优先于普通搜索摘要使用。
 
 ## 数据时效规则
 
@@ -92,8 +103,11 @@ python adviser.py --pretty-json
 
 - `Settings -> Secrets and variables -> Actions -> Secrets`
   - `AIHUBMIX_API_KEY`
+  - `SENDER_EMAIL`（如要发邮件，建议放 Secrets）
+  - `SENDER_AUTH_CODE`（邮箱授权码，必须放 Secrets）
 - `Settings -> Secrets and variables -> Actions -> Variables`
   - `STOCK_CODES`（或改用 `EMAIL_STOCK_ROUTER`）
+  - `MARKET_DATA_PROVIDER`（可选：`auto`/`yahoo`/`eastmoney`）
   - （可选）`AIHUBMIX_BASE_URL`
   - （可选）`AIHUBMIX_MODEL`
   - （可选）`EMAIL_STOCK_ROUTER`
