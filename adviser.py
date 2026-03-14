@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import builtins
+import sys
 import html
 import json
 import math
@@ -25,6 +27,22 @@ from typing import Iterable, List
 
 _TRADE_DATE_CACHE: dict[str, object] = {"date": None, "value": None}
 
+
+
+
+def configure_realtime_stdout() -> None:
+    """尽量启用行缓冲，确保运行进度实时输出。"""
+    stream = sys.stdout
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(line_buffering=True, write_through=True)
+
+
+def realtime_print(*args, **kwargs) -> None:
+    """统一使用 flush 输出，避免日志堆积到结束才打印。"""
+    if "flush" not in kwargs:
+        kwargs["flush"] = True
+    builtins.print(*args, **kwargs)
 
 
 @dataclass
@@ -282,7 +300,7 @@ def search_with_retry(ddgs, query: str, region: str, max_results: int, max_retri
             )
         except Exception as exc:
             if attempt == max_retries:
-                print(f"[进度] 检索异常（query={query}, region={region}）：{exc}")
+                realtime_print(f"[进度] 检索异常（query={query}, region={region}）：{exc}")
                 return []
             time.sleep(2 ** (attempt - 1))
 
@@ -291,9 +309,9 @@ def search_with_retry(ddgs, query: str, region: str, max_results: int, max_retri
 
 def search_context(stock_code: str, max_results: int, region: str) -> List[dict]:
     queries = build_queries(stock_code)
-    print(f"[进度] {stock_code}: 开始检索，共 {len(queries)} 条查询")
+    realtime_print(f"[进度] {stock_code}: 开始检索，共 {len(queries)} 条查询")
     results = search_context_via_queries(stock_code, queries, max_results, region)
-    print(f"[进度] {stock_code}: 检索完成，共收集 {len(results)} 条")
+    realtime_print(f"[进度] {stock_code}: 检索完成，共收集 {len(results)} 条")
     return results
 
 
@@ -309,7 +327,7 @@ def search_context_chain(stock_code: str, max_results: int, region: str, depth: 
             round_queries.extend(build_queries(seed))
         round_queries = list(dict.fromkeys(round_queries))
 
-        print(f"[进度] {stock_code}: chain-of-search 第 {round_idx}/{depth} 轮，query 数={len(round_queries)}")
+        realtime_print(f"[进度] {stock_code}: chain-of-search 第 {round_idx}/{depth} 轮，query 数={len(round_queries)}")
         round_results = search_context_via_queries(stock_code, round_queries, max_results, region)
         for hit in round_results:
             href = hit.get("href", "")
@@ -336,7 +354,7 @@ def search_context_via_queries(stock_code: str, queries: list[str], max_results:
     for current_region in fallback_regions:
         with DDGS() as ddgs:
             for idx, query in enumerate(queries, start=1):
-                print(
+                realtime_print(
                     f"[进度] {stock_code}: 检索 {idx}/{len(queries)} -> {query}"
                     f"（region={current_region}）"
                 )
@@ -362,7 +380,7 @@ def search_context_via_queries(stock_code: str, queries: list[str], max_results:
                             "published_at": published_at.date().isoformat(),
                         }
                     )
-                print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
+                realtime_print(f"[进度] {stock_code}: 该查询命中 {query_count} 条")
         if results:
             break
 
@@ -408,7 +426,7 @@ def search_context_via_rss(stock_code: str, queries: list[str], max_results: int
                 resp.raise_for_status()
                 items = parse_rss_items(resp.text)
             except Exception as exc:
-                print(f"[进度] {stock_code}: RSS 检索失败（{source_name}）: {exc}")
+                realtime_print(f"[进度] {stock_code}: RSS 检索失败（{source_name}）: {exc}")
                 continue
 
             for item in items:
@@ -584,17 +602,18 @@ def run() -> None:
     )
     args = parser.parse_args()
 
+    configure_realtime_stdout()
     config = load_config()
-    print(f"[进度] 已加载配置，共 {len(config.stock_codes)} 只股票待分析")
+    realtime_print(f"[进度] 已加载配置，共 {len(config.stock_codes)} 只股票待分析")
 
     final_results: list[dict] = []
     research_cache: dict[str, StockResearchResult] = {}
     total = len(config.stock_codes)
     for index, code in enumerate(config.stock_codes, start=1):
-        print(f"\n========== {code} ({index}/{total}) ==========")
+        realtime_print(f"\n========== {code} ({index}/{total}) ==========")
         market_snapshot = fetch_market_snapshot(code, config)
         if market_snapshot:
-            print(f"[进度] {code}: 行情源={market_snapshot.get('provider')} 时间={market_snapshot.get('timestamp')}")
+            realtime_print(f"[进度] {code}: 行情源={market_snapshot.get('provider')} 时间={market_snapshot.get('timestamp')}")
         if config.chain_of_search_depth > 1:
             contexts = search_context_chain(code, config.max_search_results, config.search_region, config.chain_of_search_depth)
         else:
@@ -608,10 +627,10 @@ def run() -> None:
                 "body": format_market_snapshot(market_snapshot),
                 "published_at": market_snapshot.get("date", "unknown"),
             })
-        print(f"[进度] {code}: 开始请求 AI 生成建议")
+        realtime_print(f"[进度] {code}: 开始请求 AI 生成建议")
         advice = request_ai_advice(config, code, contexts)
-        print(f"[进度] {code}: AI 建议生成完成")
-        print(advice)
+        realtime_print(f"[进度] {code}: AI 建议生成完成")
+        realtime_print(advice)
         research_cache[code] = StockResearchResult(
             stock_code=code,
             contexts=contexts,
@@ -624,8 +643,8 @@ def run() -> None:
         send_group_emails(config, research_cache)
 
     if args.pretty_json:
-        print("\n========== JSON ==========")
-        print(json.dumps(final_results, ensure_ascii=False, indent=2))
+        realtime_print("\n========== JSON ==========")
+        realtime_print(json.dumps(final_results, ensure_ascii=False, indent=2))
 
 
 def parse_published_at(hit: dict) -> datetime | None:
@@ -709,7 +728,7 @@ def send_group_emails_via_smtp(config: Config, research_by_stock: dict[str, Stoc
             if message is None:
                 continue
             smtp.sendmail(config.sender_email, [receiver], message.as_string())
-            print(f"[进度] 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
+            realtime_print(f"[进度] 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
 
 
 def send_group_emails_via_exchange(config: Config, research_by_stock: dict[str, StockResearchResult]) -> None:
@@ -756,7 +775,7 @@ def send_group_emails_via_exchange(config: Config, research_by_stock: dict[str, 
         }
         resp = requests.post(graph_url, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
-        print(f"[进度] Exchange 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
+        realtime_print(f"[进度] Exchange 邮件发送完成 -> {receiver} ({len(stocks)} 只股票)")
 
 
 def build_email_message(
@@ -1012,7 +1031,7 @@ def fetch_market_snapshot(stock_code: str, config: Config) -> dict | None:
             else:
                 snapshot = fetch_market_snapshot_from_eastmoney(stock_code)
         except Exception as exc:
-            print(f"[进度] {stock_code}: {provider} 行情抓取失败: {exc}")
+            realtime_print(f"[进度] {stock_code}: {provider} 行情抓取失败: {exc}")
             snapshot = None
 
         if snapshot:
@@ -1116,7 +1135,7 @@ def fetch_market_snapshot_from_akshare(stock_code: str) -> dict | None:
             break
 
     if (df is None or df.empty) and last_exception is not None:
-        print(f"[进度] {stock_code}: akshare 历史行情重试后仍失败: {last_exception}")
+        realtime_print(f"[进度] {stock_code}: akshare 历史行情重试后仍失败: {last_exception}")
     if df is None or df.empty:
         return None
 
