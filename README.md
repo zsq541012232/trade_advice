@@ -33,7 +33,7 @@ cp .env.example .env
 - `AIHUBMIX_BASE_URL`（默认 `https://api.aihubmix.com/v1`）
 - `AIHUBMIX_MODEL`（默认 `gpt-4o-mini`）
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
-- `DUCKDUCKGO_REGION`（默认 `cn-zh`）
+- `DUCKDUCKGO_REGION`（默认 `zh-cn`）
 
 > A 股代码建议优先写纯数字（如 `600900`、`000001`）。脚本会自动扩展为 `600900.SH` / `SH600900` 等别名提高检索命中率。
 

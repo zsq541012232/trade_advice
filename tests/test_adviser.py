@@ -26,7 +26,7 @@ class _FakeRequests:
 def test_build_queries_contains_expected_sections():
     queries = adviser.build_queries("AAPL")
     assert len(queries) == 3
-    assert "新闻" in queries[0]
+    assert "最新消息" in queries[0]
     assert "财报" in queries[1]
     assert "技术指标" in queries[2]
 
@@ -128,7 +128,7 @@ def test_resolve_model_keeps_configured_model_when_available():
         aihubmix_model="gpt-4o-mini",
         stock_codes=["AAPL"],
         max_search_results=5,
-        search_region="cn-zh",
+        search_region="zh-cn",
     )
     req = _FakeRequests(_FakeResponse({"data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4o"}]}))
 
@@ -144,7 +144,7 @@ def test_resolve_model_falls_back_to_preferred_candidate_when_missing():
         aihubmix_model="gpt-4o-mini",
         stock_codes=["AAPL"],
         max_search_results=5,
-        search_region="cn-zh",
+        search_region="zh-cn",
     )
     req = _FakeRequests(_FakeResponse({"data": [{"id": "deepseek-v3"}, {"id": "qwen-plus"}]}))
 
@@ -161,6 +161,6 @@ def test_stock_code_aliases_for_shanghai_code():
 def test_build_queries_expands_aliases_for_a_share_code():
     queries = adviser.build_queries("600900")
     assert len(queries) == 12
-    assert "600900 新闻 舆情 最新" in queries
+    assert "600900 股票 最新消息" in queries
     assert "600900.SH 财报 业绩 指引" in queries
-    assert "SH600900 股价 技术指标 成交量 RSI MACD" in queries
+    assert "SH600900 股价 分析 技术指标" in queries

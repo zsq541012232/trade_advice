@@ -1,2 +1,2 @@
 requests>=2.32.0
-duckduckgo-search>=6.2.0
+ddgs>=8.0.0
