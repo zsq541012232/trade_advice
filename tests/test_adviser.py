@@ -156,16 +156,30 @@ def test_resolve_model_falls_back_to_preferred_candidate_when_missing():
 
 def test_stock_code_aliases_for_shanghai_code():
     aliases = adviser.stock_code_aliases("600900")
-    assert aliases == ["600900", "600900.SH", "SH600900", "上证600900"]
+    assert aliases == ["600900", "600900.SH", "上证600900"]
 
 
 def test_build_queries_expands_aliases_for_a_share_code():
     queries = adviser.build_queries("600900")
-    assert len(queries) == 16
+    assert len(queries) == 8
     assert "600900 股票 最新消息" in queries
     assert "600900.SH 财报 业绩 指引" in queries
-    assert "SH600900 股价 分析 技术指标" in queries
-    assert "上证600900 银行业 宏观政策 影响" in queries
+    assert "600900 银行业 宏观政策 影响" in queries
+
+
+def test_normalize_query_key_dedup_semantic_aliases():
+    q1 = adviser.normalize_query_key("600900 股票 最新消息")
+    q2 = adviser.normalize_query_key("SH600900 股票 最新消息")
+    assert q1 == q2
+
+
+def test_nearest_open_trade_date_weekend_fallback():
+    from datetime import datetime, timezone
+
+    sunday = datetime(2026, 3, 1, 10, 0, tzinfo=timezone.utc)
+    d = adviser.nearest_open_trade_date(sunday)
+    # 至少应回退到工作日
+    assert d.weekday() < 5
 
 
 def test_parse_email_stock_router():
