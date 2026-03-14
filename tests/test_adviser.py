@@ -396,7 +396,7 @@ def test_build_result_dict_uses_cached_research_result():
 
     assert result == {
         "stock_code": "AAPL",
-        "stock_name": None,
+        "stock_name": "AAPL",
         "search_context_count": 2,
         "brief_summary": "观点=中性；置信度=66/100",
         "advice": "建议内容",
