@@ -382,6 +382,7 @@ def test_build_result_dict_uses_cached_research_result():
         stock_code="AAPL",
         contexts=[{"title": "t1"}, {"title": "t2"}],
         advice="建议内容",
+        brief_summary="观点=中性；置信度=66/100",
     )
 
     result = adviser.build_result_dict(research)
@@ -389,5 +390,45 @@ def test_build_result_dict_uses_cached_research_result():
     assert result == {
         "stock_code": "AAPL",
         "search_context_count": 2,
+        "brief_summary": "观点=中性；置信度=66/100",
         "advice": "建议内容",
     }
+
+
+def test_build_brief_summary_extracts_key_fields():
+    advice = """
+# AAPL 投研结论
+研究置信度：78
+趋势强度：63
+建议：看多，短线可持有/加仓
+"""
+
+    summary = adviser.build_brief_summary("AAPL", advice)
+
+    assert "观点=看多" in summary
+    assert "置信度=78/100" in summary
+    assert "趋势强度=63/100" in summary
+
+
+def test_build_email_message_lists_summary_before_details():
+    config = adviser.Config(
+        aihubmix_api_key="k",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="zh-cn",
+        sender_email="noreply@test.com",
+    )
+    research = adviser.StockResearchResult(
+        stock_code="AAPL",
+        contexts=[{"title": "t1"}],
+        advice="# AAPL 投研结论\n详细分析正文",
+        brief_summary="观点=中性；置信度=70/100",
+    )
+
+    message = adviser.build_email_message(config, "a@test.com", ["AAPL"], {"AAPL": research})
+
+    html_body = adviser.extract_html_body(message)
+    assert "快速摘要" in html_body
+    assert html_body.index("观点=中性；置信度=70/100") < html_body.index("详细分析正文")
