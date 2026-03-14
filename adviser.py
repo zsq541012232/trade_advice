@@ -94,7 +94,10 @@ def build_queries(stock_code: str) -> List[str]:
 
 def search_context(stock_code: str, max_results: int, region: str) -> List[dict]:
     results: List[dict] = []
-    from duckduckgo_search import DDGS
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        from duckduckgo_search import DDGS
 
     with DDGS() as ddgs:
         for query in build_queries(stock_code):
@@ -149,8 +152,10 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
         "Content-Type": "application/json",
     }
 
+    import requests
+
     payload = {
-        "model": config.aihubmix_model,
+        "model": resolve_model(config, requests),
         "temperature": 0.2,
         "messages": [
             {
@@ -164,16 +169,63 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
         ],
     }
 
-    import requests
-
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.dumps(resp.json(), ensure_ascii=False)
+        except ValueError:
+            detail = resp.text.strip()
+        raise RuntimeError(
+            f"AIHUBMIX 请求失败（HTTP {resp.status_code}）。"
+            f"请检查 AIHUBMIX_MODEL 是否可用，当前值：{payload['model']}。"
+            f"响应：{detail}"
+        ) from exc
     data = resp.json()
 
     try:
         return data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"AIHUBMIX 返回格式异常: {json.dumps(data, ensure_ascii=False)}") from exc
+
+
+def resolve_model(config: Config, requests_module) -> str:
+    """优先使用用户配置模型，不可用时给出清晰报错与可选模型。"""
+    url = f"{config.aihubmix_base_url}/models"
+    headers = {"Authorization": f"Bearer {config.aihubmix_api_key}"}
+
+    try:
+        resp = requests_module.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        # /models 不可用时，不阻断主流程，回退到用户指定模型。
+        return config.aihubmix_model
+
+    model_ids = {
+        item.get("id", "")
+        for item in data.get("data", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+
+    if not model_ids or config.aihubmix_model in model_ids:
+        return config.aihubmix_model
+
+    preferred_candidates = [
+        "gpt-4o",
+        "gpt-4.1-mini",
+        "deepseek-v3",
+        "deepseek-r1",
+        "claude-3-5-sonnet-latest",
+    ]
+    for candidate in preferred_candidates:
+        if candidate in model_ids:
+            return candidate
+
+    first_available = sorted(model_ids)[0]
+    return first_available
 
 
 def run() -> None:
