@@ -168,7 +168,7 @@ def load_config() -> Config:
     huggingface_model = (
         os.getenv("HUGGINGFACE_MODEL", "").strip()
         or os.getenv("HF_MODEL", "").strip()
-        or "Qwen/Qwen2.5-72B-Instruct"
+        or "deepseek-ai/DeepSeek-R1:novita"
     )
 
     if llm_provider == "aihubmix" and not api_key:
