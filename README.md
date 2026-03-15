@@ -37,7 +37,7 @@ cp .env.example .env
 - `AIHUBMIX_BASE_URL`（默认 `https://api.aihubmix.com/v1`）
 - `AIHUBMIX_MODEL`（默认 `gpt-4o-mini`）
 - `NVIDIA_NIM_BASE_URL`（默认 `https://integrate.api.nvidia.com/v1`）
-- `NVIDIA_NIM_MODEL`（默认 `meta/llama-3.1-70b-instruct`）
+- `NIM_MODEL`（默认 `meta/llama-3.1-70b-instruct`）
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
 - `DUCKDUCKGO_REGION`（默认 `zh-cn`）
 - `MARKET_DATA_PROVIDER`（默认 `auto`，可选 `yahoo` / `eastmoney` / `akshare`）
