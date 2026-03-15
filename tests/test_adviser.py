@@ -568,6 +568,18 @@ def test_load_config_supports_nim_provider(monkeypatch):
     assert config.nim_model == "meta/llama-3.1-8b-instruct"
 
 
+def test_load_config_uses_nim_default_model_when_env_missing(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "nim")
+    monkeypatch.setenv("NVIDIA_NIM_API_KEY", "nim-key")
+    monkeypatch.delenv("NVIDIA_NIM_MODEL", raising=False)
+    monkeypatch.delenv("NIM_MODEL", raising=False)
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+
+    config = adviser.load_config()
+
+    assert config.nim_model == "deepseek-ai/deepseek-r1"
+
+
 def test_load_config_uses_nim_default_base_url_when_env_empty(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "nim")
     monkeypatch.setenv("NVIDIA_NIM_API_KEY", "nim-key")

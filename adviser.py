@@ -77,7 +77,7 @@ class Config:
     search_region: str
     nim_api_key: str = ""
     nim_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nim_model: str = "meta/llama-3.1-70b-instruct"
+    nim_model: str = "deepseek-ai/deepseek-r1"
     email_stock_router: dict[str, List[str]] = field(default_factory=dict)
     sender_email: str | None = None
     sender_auth_code: str | None = None
@@ -124,7 +124,7 @@ def load_config() -> Config:
     nim_model = (
         os.getenv("NVIDIA_NIM_MODEL", "").strip()
         or os.getenv("NIM_MODEL", "").strip()
-        or "meta/llama-3.1-70b-instruct"
+        or "deepseek-ai/deepseek-r1"
     )
 
     if llm_provider == "aihubmix" and not api_key:
