@@ -1,6 +1,6 @@
 # trade_advice
 
-基于 **AIHUBMIX + DuckDuckGo + 行情源** 的股票投资建议脚本。会先抓取新闻/舆情/财报/技术指标相关信息，再由大模型输出：
+基于 **AIHUBMIX / NVIDIA NIM + DuckDuckGo + 行情源** 的股票投资建议脚本。会先抓取新闻/舆情/财报/技术指标相关信息，再由大模型输出：
 
 - 短线建议（1天~2周）
 - 长线建议（3个月~3年）
@@ -27,13 +27,17 @@ cp .env.example .env
 
 至少需要：
 
-- `AIHUBMIX_API_KEY`
+- `LLM_PROVIDER`（`aihubmix` 或 `nim`）
+- 当 `LLM_PROVIDER=aihubmix`：`AIHUBMIX_API_KEY`
+- 当 `LLM_PROVIDER=nim`：`NVIDIA_NIM_API_KEY`（或兼容变量 `NIM_API_KEY`）
 - `STOCK_CODES`（例如 `AAPL,TSLA,600519.SS`）或 `EMAIL_STOCK_ROUTER`
 
 常用可选项：
 
 - `AIHUBMIX_BASE_URL`（默认 `https://api.aihubmix.com/v1`）
 - `AIHUBMIX_MODEL`（默认 `gpt-4o-mini`）
+- `NVIDIA_NIM_BASE_URL`（默认 `https://integrate.api.nvidia.com/v1`）
+- `NVIDIA_NIM_MODEL`（默认 `meta/llama-3.1-70b-instruct`）
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
 - `DUCKDUCKGO_REGION`（默认 `zh-cn`）
 - `MARKET_DATA_PROVIDER`（默认 `auto`，可选 `yahoo` / `eastmoney` / `akshare`）
