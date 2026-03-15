@@ -13,9 +13,14 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     env:
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
       AIHUBMIX_API_KEY: ${{ secrets.AIHUBMIX_API_KEY }}
       AIHUBMIX_BASE_URL: ${{ vars.AIHUBMIX_BASE_URL }}
       AIHUBMIX_MODEL: ${{ vars.AIHUBMIX_MODEL }}
+      NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+      NIM_API_KEY: ${{ secrets.NIM_API_KEY }}
+      NIM_BASE_URL: ${{ vars.NIM_BASE_URL }}
+      NIM_MODEL: ${{ vars.NIM_MODEL }}
       STOCK_CODES: ${{ vars.STOCK_CODES }}
       EMAIL_STOCK_ROUTER: ${{ vars.EMAIL_STOCK_ROUTER }}
       DUCKDUCKGO_MAX_RESULTS: ${{ vars.DUCKDUCKGO_MAX_RESULTS }}
@@ -44,10 +49,23 @@ jobs:
 
       - name: Validate required envs
         run: |
-          if [ -z "$AIHUBMIX_API_KEY" ]; then
-            echo "Missing secret AIHUBMIX_API_KEY" >&2
+          PROVIDER="${LLM_PROVIDER:-aihubmix}"
+
+          if [ "$PROVIDER" = "aihubmix" ] && [ -z "$AIHUBMIX_API_KEY" ]; then
+            echo "Missing secret AIHUBMIX_API_KEY when LLM_PROVIDER=aihubmix" >&2
             exit 1
           fi
+
+          if [ "$PROVIDER" = "nim" ] && [ -z "$NVIDIA_NIM_API_KEY" ] && [ -z "$NIM_API_KEY" ]; then
+            echo "Missing secret NVIDIA_NIM_API_KEY (or NIM_API_KEY) when LLM_PROVIDER=nim" >&2
+            exit 1
+          fi
+
+          if [ "$PROVIDER" != "aihubmix" ] && [ "$PROVIDER" != "nim" ]; then
+            echo "Invalid LLM_PROVIDER: $PROVIDER (only aihubmix or nim)" >&2
+            exit 1
+          fi
+
           if [ -z "$STOCK_CODES" ] && [ -z "$EMAIL_STOCK_ROUTER" ]; then
             echo "Missing repo variable STOCK_CODES (or EMAIL_STOCK_ROUTER)" >&2
             exit 1
