@@ -508,6 +508,17 @@ def test_load_config_supports_nim_provider(monkeypatch):
     assert config.nim_model == "meta/llama-3.1-8b-instruct"
 
 
+def test_load_config_uses_nim_default_base_url_when_env_empty(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "nim")
+    monkeypatch.setenv("NVIDIA_NIM_API_KEY", "nim-key")
+    monkeypatch.setenv("NVIDIA_NIM_BASE_URL", "")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+
+    config = adviser.load_config()
+
+    assert config.nim_base_url == "https://integrate.api.nvidia.com/v1"
+
+
 def test_load_config_raises_when_nim_key_missing(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "nim")
     monkeypatch.delenv("NVIDIA_NIM_API_KEY", raising=False)
@@ -520,6 +531,36 @@ def test_load_config_raises_when_nim_key_missing(monkeypatch):
     except ValueError as exc:
         assert "NVIDIA_NIM_API_KEY" in str(exc)
 
+
+def test_detect_stock_name_fallbacks_to_yahoo_for_non_cn_symbol(monkeypatch):
+    monkeypatch.setattr(adviser, "fetch_cn_stock_name", lambda code: None)
+    monkeypatch.setattr(adviser, "fetch_yahoo_stock_name", lambda code: "Apple Inc.")
+
+    detected = adviser.detect_stock_name("AAPL", None)
+
+    assert detected == "Apple Inc."
+
+
+
+
+def test_detect_stock_name_from_contexts_extracts_name_from_title():
+    contexts = [
+        {"title": "Apple Inc. (AAPL) latest earnings", "body": ""},
+    ]
+
+    detected = adviser.detect_stock_name_from_contexts("AAPL", contexts)
+
+    assert detected == "Apple Inc."
+
+
+def test_detect_stock_name_from_contexts_extracts_name_from_body_with_colon():
+    contexts = [
+        {"title": "market recap", "body": "AAPL: Apple Inc."},
+    ]
+
+    detected = adviser.detect_stock_name_from_contexts("AAPL", contexts)
+
+    assert detected == "Apple Inc."
 
 def test_load_config_reads_search_reflection_max_rounds(monkeypatch):
     monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
