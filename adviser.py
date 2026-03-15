@@ -735,25 +735,20 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
         你正在扮演“机构级股票研究员 + 短线操盘手 + 价值投资组合经理”，请基于以下关于股票 {stock_code} 的信息，输出严谨、可审计、可执行的投资研究结论。
 
         分析与合规要求：
-        0) 只允许使用最近 3 个月内的新闻，且股价/技术指标必须按“最新可得数据”解读；若无法确认最新性，直接标注“数据不足”。
-        1) 明确区分事实、推断、假设，不得把未经验证的信息当作事实。
-        2) 必须分别给出“短线建议（1天~2周）”与“长线建议（3个月~3年）”。
-        3) 每类建议都要包含：方向（买入/持有/减仓/观望）、建议仓位（百分比区间）、触发条件、失效条件、止损/风控、关键依据。
-        4) 短线部分重点关注：趋势/量价/波动率结构/ATR/BOLL/ADX/MFI/OBV与事件催化；长线部分重点关注：基本面、行业景气度、估值、护城河与回撤风险。
-        5) 必须输出“情景分析”：基准情景、乐观情景、悲观情景，并给出主观概率（合计 100%）。
-        6) 必须输出“研究置信度（0-100）”与主要不确定性来源。
-        7) 如果信息不足或冲突，明确写出不确定性与补充观察清单。
-        8) 严禁保证收益，必须包含风险提示。
-        9) 用简体中文，严格按照下述模板和字段顺序输出，不要擅自省略版块；没有数据就写“数据不足”。
-        10) 所有价格、涨跌幅、量能、均线、止损位必须与可得行情快照一致；若无法核验就显式标注“待确认”。
+        0) 若关键信息缺失，先基于已有线索继续主动检索补充；若仍缺失，再给出“保守推测”并明确标注“推测”与依据。
+        1) 只允许使用最近 3 个月内的新闻，且股价/技术指标必须按“最新可得数据”解读；若无法确认最新性，直接标注“数据不足”。
+        2) 明确区分事实、推断、假设，不得把未经验证的信息当作事实。
+        3) 必须分别给出“短线建议（1天~2周）”与“长线建议（3个月~3年）”。
+        4) 每类建议都要包含：方向（买入/持有/减仓/观望）、建议仓位（百分比区间）、触发条件、失效条件、止损/风控、关键依据。
+        5) 短线部分重点关注：趋势/量价/波动率结构/ATR/BOLL/ADX/MFI/OBV与事件催化；长线部分重点关注：基本面、行业景气度、估值、护城河与回撤风险。
+        6) 必须输出“情景分析”：基准情景、乐观情景、悲观情景，并给出主观概率（合计 100%）。
+        7) 必须输出“研究置信度（0-100）”与主要不确定性来源。
+        8) 如果信息不足或冲突，明确写出不确定性与补充观察清单。
+        9) 严禁保证收益，必须包含风险提示。
+        10) 用简体中文，严格按照下述模板和字段顺序输出，不要擅自省略版块；没有数据就写“数据不足”。
+        11) 所有价格、涨跌幅、量能、均线、止损位必须与可得行情快照一致；若无法核验就显式标注“待确认”。
 
-        输出模板（按此骨架填充，保留 emoji 与标题样式）：
-        🎯 {{date}} 决策仪表盘
-        共分析 {{n}} 只股票 | 🟢买入:{{buy_n}} 🟡观望:{{watch_n}} 🔴卖出:{{sell_n}}
-
-        📊 分析结果摘要
-        🟢/🟡/🔴 {{股票名}}({stock_code}): {{动作}} | 评分 {{score}} | {{一句话观点}}
-
+        输出模板（按此骨架填充，保留 emoji 与标题样式；只输出“单只股票明细”，不要输出组合总览）：
         🟢/🟡/🔴 {{股票名}} ({stock_code})
         📰 重要信息速览
         💭 舆情情绪: {{sentiment}}
@@ -1131,84 +1126,118 @@ def build_email_message(
     stocks: list[str],
     research_by_stock: dict[str, StockResearchResult],
 ) -> MIMEMultipart | None:
-    html_sections: list[str] = []
-    quick_summary_items: list[str] = []
-    plain_lines = ["以下为今日股票分析：", ""]
-    for code in stocks:
-        research = research_by_stock.get(code)
-        if not research:
-            continue
-        advice = research.advice
-        safe_advice = markdown_to_html(advice)
-        summary = research.brief_summary
-        stock_label = format_stock_label(code, research.stock_name)
-        quick_summary_items.append(
-            "<li style='margin:8px 0;line-height:1.6;'>"
-            f"<strong style='color:#0f172a;'>{html.escape(stock_label)}</strong>"
-            f"<div style='margin-top:4px;color:#334155;'>{html.escape(summary)}</div>"
-            "</li>"
-        )
-        html_sections.append(
-            "<section style='margin:16px 0;padding:14px;border:1px solid #e2e8f0;border-radius:12px;background:#ffffff;'>"
-            f"<h3 style='margin:0 0 10px 0;color:#0f172a;font-size:16px;'>{html.escape(stock_label)}</h3>"
-            f"<div style='line-height:1.7;color:#1f2937;font-size:14px;'>{safe_advice}</div>"
-            "</section>"
-        )
-        plain_lines.extend([f"- {stock_label}：{summary}", ""])
+    detail_sections: list[str] = []
+    summary_lines: list[str] = []
+    buy_n = 0
+    watch_n = 0
+    sell_n = 0
+    report_date = now_shanghai().strftime("%Y-%m-%d")
+    report_time = now_shanghai().strftime("%Y-%m-%d %H:%M:%S")
 
     for code in stocks:
         research = research_by_stock.get(code)
         if not research:
             continue
-        plain_lines.extend([f"## {format_stock_label(code, research.stock_name)}", research.advice, ""])
+        signal, action = extract_signal_and_action(research.advice)
+        score = extract_score(research.advice)
+        view = extract_one_line_decision(research.advice) or research.brief_summary
+        if signal == "🟢":
+            buy_n += 1
+        elif signal == "🔴":
+            sell_n += 1
+        else:
+            watch_n += 1
 
-    if not html_sections:
+        stock_name = (research.stock_name or code).strip() or code
+        summary_lines.append(f"{signal} {stock_name}({code}): {action} | 评分 {score} | {view}")
+        detail_sections.append(strip_portfolio_header_from_advice(research.advice))
+
+    analyzed_n = len(summary_lines)
+    if analyzed_n == 0:
         return None
 
-    summary_rows = "".join(
-        "<tr>"
-        f"<td style='padding:10px 12px;border-bottom:1px solid #eef2f7;'>{html.escape(format_stock_label(code, research_by_stock[code].stock_name))}</td>"
-        f"<td style='padding:10px 12px;border-bottom:1px solid #eef2f7;'>{len(research_by_stock.get(code, StockResearchResult(code, None, [], '', '信息不足')).contexts)}</td>"
-        "<td style='padding:10px 12px;border-bottom:1px solid #eef2f7;'>✅ 已完成</td>"
-        "</tr>"
-        for code in stocks
-        if code in research_by_stock
+    report_text = (
+        f"🎯 {report_date} 决策仪表盘\n"
+        f"共分析 {analyzed_n} 只股票 | 🟢买入:{buy_n} 🟡观望:{watch_n} 🔴卖出:{sell_n}\n\n"
+        "📊 分析结果摘要\n"
+        + "\n".join(summary_lines)
+        + "\n\n"
+        + "\n\n".join(section for section in detail_sections if section.strip())
+        + f"\n\n报告生成时间：{report_time}"
     )
-
+    html_content = markdown_to_html(report_text)
     html_body = (
-        "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f1f5f9;padding:18px;'>"
-        "<div style='max-width:900px;margin:0 auto;background:#ffffff;border:1px solid #dbe2ea;border-radius:14px;overflow:hidden;'>"
-        "<div style='padding:18px 20px;background:linear-gradient(120deg,#0f172a,#1d4ed8);color:#ffffff;'>"
-        "<h2 style='margin:0 0 6px 0;font-size:22px;'>📈 股票分析日报</h2>"
-        f"<p style='margin:0;font-size:13px;opacity:0.9;'>⏰ {now_shanghai().strftime('%Y-%m-%d %H:%M:%S')} ｜ 📬 {html.escape(receiver)}</p>"
-        "</div>"
-        "<div style='padding:16px 18px 6px 18px;'>"
-        "<table style='width:100%;border-collapse:collapse;margin:0 0 14px 0;font-size:13px;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;'>"
-        "<thead><tr style='background:#f8fafc;color:#334155;'>"
-        "<th style='text-align:left;padding:10px 12px;'>股票</th>"
-        "<th style='text-align:left;padding:10px 12px;'>样本条数</th>"
-        "<th style='text-align:left;padding:10px 12px;'>状态</th>"
-        "</tr></thead>"
-        f"<tbody>{summary_rows}</tbody></table>"
-        "<div style='margin:0 0 14px 0;padding:12px 14px;background:#f8fafc;border:1px solid #dbeafe;border-radius:10px;'>"
-        "<p style='margin:0 0 8px 0;font-weight:700;color:#0f172a;'>🧾 AI 快速摘要</p>"
-        "<ul style='margin:0;padding-left:20px;color:#334155;font-size:14px;'>"
-        + "".join(quick_summary_items)
-        + "</ul></div>"
-        "<p style='margin:0 0 8px 0;color:#475569;font-size:13px;'>📌 阅读顺序：核心结论 → 执行计划 → 风险提示。</p>"
-        + "".join(html_sections)
-        + "<p style='margin:14px 0 18px 0;color:#64748b;font-size:12px;'>"
-        "⚠️ 风险提示：以上内容仅供参考，不构成任何投资建议，请严格做好仓位与止损管理。"
-        "</p></div></div></body></html>"
+        "<html><body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f8fafc;padding:16px;'>"
+        "<div style='max-width:960px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:16px 18px;'>"
+        f"{html_content}"
+        "</div></body></html>"
     )
 
     message = MIMEMultipart("alternative")
-    message.attach(MIMEText("\n".join(plain_lines), "plain", "utf-8"))
+    message.attach(MIMEText(report_text, "plain", "utf-8"))
     message.attach(MIMEText(html_body, "html", "utf-8"))
-    message["Subject"] = "股票分析日报"
+    message["Subject"] = f"{report_date} 决策仪表盘"
     message["From"] = formataddr(("Stock Adviser", config.sender_email or config.exchange_sender_upn or ""))
     message["To"] = receiver
     return message
+
+
+def extract_signal_and_action(advice: str) -> tuple[str, str]:
+    signal = "🟡"
+    action = "观望"
+    normalized = advice.replace("\u3000", " ")
+    if re.search(r"\b买入\b|强烈看多|看多", normalized):
+        signal = "🟢"
+        action = "买入"
+    elif re.search(r"\b卖出\b|减仓|看空", normalized):
+        signal = "🔴"
+        action = "卖出"
+    elif re.search(r"持有", normalized):
+        signal = "🟢"
+        action = "持有/小仓买入"
+
+    line_match = re.search(r"^[🟢🟡🔴].*?\|\s*([^|\n]+)", normalized, flags=re.MULTILINE)
+    if line_match:
+        action = line_match.group(1).strip()
+        if action.startswith("买"):
+            signal = "🟢"
+        elif action.startswith(("卖", "减")):
+            signal = "🔴"
+        elif action.startswith(("观", "持")):
+            signal = "🟡" if action.startswith("观") else "🟢"
+    return signal, action
+
+
+def extract_score(advice: str) -> str:
+    score = extract_with_regex(advice, r"评分[^0-9]*(\d{1,3})")
+    if score:
+        return score
+    confidence = extract_with_regex(advice, r"置信度[^0-9]*(\d{1,3})")
+    return confidence or "待确认"
+
+
+def extract_one_line_decision(advice: str) -> str | None:
+    for line in advice.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("一句话决策"):
+            return stripped.split(":", 1)[-1].strip().split("：", 1)[-1].strip()
+    first_meaningful = next((ln.strip() for ln in advice.splitlines() if ln.strip()), "")
+    return first_meaningful[:60] if first_meaningful else None
+
+
+def strip_portfolio_header_from_advice(advice: str) -> str:
+    lines = advice.splitlines()
+    keep_from = 0
+    for idx, line in enumerate(lines):
+        if re.match(r"^[🟢🟡🔴]\s*.+\([^)]+\)", line.strip()):
+            keep_from = idx
+            break
+        if line.strip().startswith("📰 重要信息速览"):
+            keep_from = max(0, idx - 1)
+            break
+    trimmed = "\n".join(lines[keep_from:]).strip()
+    trimmed = re.sub(r"\n?报告生成时间[：:].*?$", "", trimmed, flags=re.MULTILINE).strip()
+    return trimmed
 
 
 def extract_html_body(message: MIMEMultipart) -> str:
