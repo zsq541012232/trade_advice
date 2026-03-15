@@ -14,38 +14,66 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+      
+      # AIHUBMIX
       AIHUBMIX_API_KEY: ${{ secrets.AIHUBMIX_API_KEY }}
       AIHUBMIX_BASE_URL: ${{ vars.AIHUBMIX_BASE_URL }}
       AIHUBMIX_MODEL: ${{ vars.AIHUBMIX_MODEL }}
+      
+      # NVIDIA NIM
       NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
       NIM_API_KEY: ${{ secrets.NIM_API_KEY }}
       NIM_BASE_URL: ${{ vars.NIM_BASE_URL }}
       NIM_MODEL: ${{ vars.NIM_MODEL }}
       NVIDIA_NIM_BASE_URL: ${{ vars.NVIDIA_NIM_BASE_URL }}
       NVIDIA_NIM_MODEL: ${{ vars.NVIDIA_NIM_MODEL }}
+      
+      # LM Studio
+      LMSTUDIO_API_KEY: ${{ secrets.LMSTUDIO_API_KEY }}
+      LMSTUDIO_BASE_URL: ${{ vars.LMSTUDIO_BASE_URL }}
+      LMSTUDIO_MODEL: ${{ vars.LMSTUDIO_MODEL }}
+      
+      # Hugging Face
+      HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE_API_KEY }}
+      HF_API_KEY: ${{ secrets.HF_API_KEY }}
+      HUGGINGFACE_BASE_URL: ${{ vars.HUGGINGFACE_BASE_URL }}
+      HUGGINGFACE_MODEL: ${{ vars.HUGGINGFACE_MODEL }}
+
+      # Stock & Routing
       STOCK_CODES: ${{ vars.STOCK_CODES }}
       EMAIL_STOCK_ROUTER: ${{ vars.EMAIL_STOCK_ROUTER }}
+      
+      # DuckDuckGo & Search
       DUCKDUCKGO_MAX_RESULTS: ${{ vars.DUCKDUCKGO_MAX_RESULTS }}
       DUCKDUCKGO_REGION: ${{ vars.DUCKDUCKGO_REGION }}
       SEARCH_USE_VPN: ${{ vars.SEARCH_USE_VPN }}
       CLASH_SUBSCRIPTION_URL: ${{ secrets.CLASH_SUBSCRIPTION_URL }}
       CLASH_PROXY_URL: ${{ vars.CLASH_PROXY_URL }}
+      CHAIN_OF_SEARCH_DEPTH: ${{ vars.CHAIN_OF_SEARCH_DEPTH }}
+      INFORMATION_ASSESSMENT_ROUNDS: ${{ vars.INFORMATION_ASSESSMENT_ROUNDS }}
+      SEARCH_REFLECTION_MAX_ROUNDS: ${{ vars.SEARCH_REFLECTION_MAX_ROUNDS }}
+      
+      # Market Data
       MARKET_DATA_PROVIDER: ${{ vars.MARKET_DATA_PROVIDER }}
+      
+      # Email SMTP
       SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
       SENDER_AUTH_CODE: ${{ secrets.SENDER_AUTH_CODE }}
       SMTP_HOST: ${{ vars.SMTP_HOST }}
       SMTP_PORT: ${{ vars.SMTP_PORT }}
       SMTP_SECURITY: ${{ vars.SMTP_SECURITY }}
       EMAIL_DELIVERY_PROTOCOL: ${{ vars.EMAIL_DELIVERY_PROTOCOL }}
-      CHAIN_OF_SEARCH_DEPTH: ${{ vars.CHAIN_OF_SEARCH_DEPTH }}
-      INFORMATION_ASSESSMENT_ROUNDS: ${{ vars.INFORMATION_ASSESSMENT_ROUNDS }}
-      SEARCH_REFLECTION_MAX_ROUNDS: ${{ vars.SEARCH_REFLECTION_MAX_ROUNDS }}
+      
+      # Email Exchange
       EXCHANGE_TENANT_ID: ${{ vars.EXCHANGE_TENANT_ID }}
       EXCHANGE_CLIENT_ID: ${{ vars.EXCHANGE_CLIENT_ID }}
       EXCHANGE_CLIENT_SECRET: ${{ secrets.EXCHANGE_CLIENT_SECRET }}
       EXCHANGE_SENDER_UPN: ${{ vars.EXCHANGE_SENDER_UPN }}
+      
+      # Schedule
       RUN_ADVICE_TIME: ${{ vars.RUN_ADVICE_TIME }}
       RUN_ADVICE_TIMEZONE: ${{ vars.RUN_ADVICE_TIMEZONE }}
+      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,9 +99,16 @@ jobs:
             echo "Missing secret NVIDIA_NIM_API_KEY (or NIM_API_KEY) when LLM_PROVIDER=nim" >&2
             exit 1
           fi
+          
+          if [ "$PROVIDER" = "huggingface" ] && [ -z "$HUGGINGFACE_API_KEY" ] && [ -z "$HF_API_KEY" ]; then
+            echo "Missing secret HUGGINGFACE_API_KEY (or HF_API_KEY) when LLM_PROVIDER=huggingface" >&2
+            exit 1
+          fi
+          
+          # LM Studio 通常不需要 API Key，故此处跳过强制校验，但仍然需验证 provider 名称合法性
 
-          if [ "$PROVIDER" != "aihubmix" ] && [ "$PROVIDER" != "nim" ]; then
-            echo "Invalid LLM_PROVIDER: $PROVIDER (only aihubmix or nim)" >&2
+          if [ "$PROVIDER" != "aihubmix" ] && [ "$PROVIDER" != "nim" ] && [ "$PROVIDER" != "lmstudio" ] && [ "$PROVIDER" != "huggingface" ]; then
+            echo "Invalid LLM_PROVIDER: $PROVIDER (only aihubmix, nim, lmstudio, or huggingface)" >&2
             exit 1
           fi
 
