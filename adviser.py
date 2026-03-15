@@ -119,6 +119,7 @@ def load_config() -> Config:
     nim_base_url = normalize_base_url(
         os.getenv("NVIDIA_NIM_BASE_URL", os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")),
         var_name="NVIDIA_NIM_BASE_URL",
+        fallback_url="https://integrate.api.nvidia.com/v1",
     )
     nim_model = (
         os.getenv("NVIDIA_NIM_MODEL", "").strip()
@@ -262,10 +263,14 @@ def infer_smtp_host(sender_email: str | None) -> str:
     return mapping.get(domain, f"smtp.{domain}")
 
 
-def normalize_base_url(raw_base_url: str, var_name: str = "AIHUBMIX_BASE_URL") -> str:
+def normalize_base_url(
+    raw_base_url: str,
+    var_name: str = "AIHUBMIX_BASE_URL",
+    fallback_url: str = "https://api.aihubmix.com/v1",
+) -> str:
     base_url = raw_base_url.strip()
     if not base_url:
-        return "https://api.aihubmix.com/v1"
+        return fallback_url.rstrip("/")
 
     parsed = urlparse(base_url)
 
@@ -865,6 +870,9 @@ def run() -> None:
                 "published_at": market_snapshot.get("date", "unknown"),
             })
         contexts = refine_context_with_ai(config, code, contexts, runtime_model_name)
+        if not stock_name:
+            stock_name = detect_stock_name_from_contexts(code, contexts)
+            stock_label = format_stock_label(code, stock_name)
         realtime_print(f"[进度] {stock_label}: 开始请求 AI 生成建议")
         advice = request_ai_advice(config, code, contexts, runtime_model_name)
         realtime_print(f"[进度] {stock_label}: AI 建议生成完成")
@@ -1139,7 +1147,61 @@ def detect_stock_name(stock_code: str, market_snapshot: dict | None) -> str | No
             value = market_snapshot.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    return fetch_cn_stock_name(stock_code)
+    detected = fetch_cn_stock_name(stock_code)
+    if detected:
+        return detected
+    return fetch_yahoo_stock_name(stock_code)
+
+
+def detect_stock_name_from_contexts(stock_code: str, contexts: list[dict]) -> str | None:
+    aliases = {alias.upper() for alias in stock_code_aliases(stock_code)}
+    yahoo_symbol = to_yahoo_symbol(stock_code).upper()
+    if yahoo_symbol:
+        aliases.add(yahoo_symbol)
+
+    for context in contexts:
+        for field in ("title", "body"):
+            raw_text = context.get(field, "")
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                continue
+            extracted = extract_stock_name_from_text(raw_text, aliases)
+            if extracted:
+                return extracted
+    return None
+
+
+def extract_stock_name_from_text(text: str, aliases: set[str]) -> str | None:
+    if not aliases:
+        return None
+
+    for alias in aliases:
+        patterns = [
+            rf"([A-Za-z一-鿿][A-Za-z0-9一-鿿&.\-\s]{{1,40}}?)\s*[（(\[]\s*{re.escape(alias)}\s*[)）\]]",
+            rf"{re.escape(alias)}\s*[（(\[]\s*([A-Za-z一-鿿][A-Za-z0-9一-鿿&.\-\s]{{1,40}}?)\s*[)）\]]",
+            rf"{re.escape(alias)}\s*[-—:：]\s*([A-Za-z一-鿿][A-Za-z0-9一-鿿&.\-\s]{{1,40}})",
+            rf"([A-Za-z一-鿿][A-Za-z0-9一-鿿&.\-\s]{{1,40}})\s*[-—:：]\s*{re.escape(alias)}",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = clean_extracted_stock_name(match.group(1))
+            if candidate:
+                return candidate
+    return None
+
+
+def clean_extracted_stock_name(candidate: str) -> str | None:
+    name = re.sub(r"\s+", " ", candidate).strip(" -—:：,，。;；()（）[]【】")
+    if not name:
+        return None
+    lowered = name.lower()
+    blocked = {"stock", "shares", "quote", "news", "analysis", "finance", "股票", "行情", "分析"}
+    if lowered in blocked:
+        return None
+    if len(name) < 2:
+        return None
+    return name
 
 
 def fetch_cn_stock_name(stock_code: str) -> str | None:
@@ -1161,6 +1223,29 @@ def fetch_cn_stock_name(stock_code: str) -> str | None:
             return None
         name = values[0].strip()
         return name or None
+    except Exception:
+        return None
+
+
+def fetch_yahoo_stock_name(stock_code: str) -> str | None:
+    symbol = to_yahoo_symbol(stock_code)
+    if not symbol:
+        return None
+    try:
+        import requests
+
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={quote_plus(symbol)}"
+        response = request_with_retry(requests.get, url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        result = (data.get("quoteResponse") or {}).get("result") or []
+        if not result:
+            return None
+        quote = result[0] if isinstance(result[0], dict) else {}
+        name = quote.get("shortName") or quote.get("longName")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return None
     except Exception:
         return None
 
