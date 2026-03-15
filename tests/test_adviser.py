@@ -174,6 +174,66 @@ def test_resolve_model_falls_back_to_preferred_candidate_when_missing():
     assert model == "deepseek-v3"
 
 
+
+
+def test_resolve_model_for_nim_prefers_deepseek_r1_when_available():
+    config = adviser.Config(
+        llm_provider="nim",
+        aihubmix_api_key="",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        nim_api_key="nim-k",
+        nim_base_url="https://integrate.api.nvidia.com/v1",
+        nim_model="unknown-nim-model",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="zh-cn",
+    )
+    req = _FakeRequests(_FakeResponse({"data": [{"id": "meta/llama-3.1-8b-instruct"}, {"id": "deepseek-ai/deepseek-r1"}]}))
+
+    model = adviser.resolve_model(config, req)
+
+    assert model == "deepseek-ai/deepseek-r1"
+
+
+def test_resolve_model_for_nim_prefers_nim_candidates_when_configured_missing():
+    config = adviser.Config(
+        llm_provider="nim",
+        aihubmix_api_key="",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        nim_api_key="nim-k",
+        nim_base_url="https://integrate.api.nvidia.com/v1",
+        nim_model="unknown-nim-model",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="zh-cn",
+    )
+    req = _FakeRequests(_FakeResponse({"data": [{"id": "gpt-4o"}, {"id": "meta/llama-3.1-8b-instruct"}]}))
+
+    model = adviser.resolve_model(config, req)
+
+    assert model == "meta/llama-3.1-8b-instruct"
+
+
+def test_resolve_model_for_nim_falls_back_to_first_available_when_no_nim_candidate():
+    config = adviser.Config(
+        llm_provider="nim",
+        aihubmix_api_key="",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        nim_api_key="nim-k",
+        nim_base_url="https://integrate.api.nvidia.com/v1",
+        nim_model="unknown-nim-model",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="zh-cn",
+    )
+    req = _FakeRequests(_FakeResponse({"data": [{"id": "gpt-4o"}, {"id": "qwen-plus"}]}))
+
+    model = adviser.resolve_model(config, req)
+
+    assert model == "gpt-4o"
 def test_stock_code_aliases_for_shanghai_code():
     aliases = adviser.stock_code_aliases("600900")
     assert aliases == ["600900", "600900.SH", "上证600900"]

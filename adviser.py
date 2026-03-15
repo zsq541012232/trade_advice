@@ -814,13 +814,23 @@ def resolve_model(config: Config, requests_module) -> str:
     if not model_ids or configured_model in model_ids:
         return configured_model
 
-    preferred_candidates = [
-        "gpt-4o",
-        "gpt-4.1-mini",
-        "deepseek-v3",
-        "deepseek-r1",
-        "claude-3-5-sonnet-latest",
-    ]
+    if config.llm_provider == "nim":
+        preferred_candidates = [
+            "deepseek-ai/deepseek-r1",
+            "deepseek-r1",
+            "meta/llama-3.1-70b-instruct",
+            "meta/llama-3.1-8b-instruct",
+            "nvidia/llama-3.1-nemotron-70b-instruct",
+            "mistralai/mixtral-8x7b-instruct-v0.1",
+        ]
+    else:
+        preferred_candidates = [
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "deepseek-v3",
+            "deepseek-r1",
+            "claude-3-5-sonnet-latest",
+        ]
     for candidate in preferred_candidates:
         if candidate in model_ids:
             return candidate
