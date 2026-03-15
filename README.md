@@ -49,6 +49,7 @@ cp .env.example .env
 - `SMTP_SECURITY`（默认 `ssl`，可选 `starttls` / `plain`）
 - `EMAIL_DELIVERY_PROTOCOL`（默认 `smtp`，可配置 `smtp` / `pop3` / `imap` / `exchange` / `carddav`）
 - `CHAIN_OF_SEARCH_DEPTH`（默认 `1`，>1 时启用多轮检索）
+- `INFORMATION_ASSESSMENT_ROUNDS`（默认 `3`，控制“信息评估 + 追加检索”最大迭代轮次；兼容旧变量 `SEARCH_REFLECTION_MAX_ROUNDS`）
 
 > A 股代码建议优先写纯数字（如 `600900`、`000001`）。脚本会自动扩展为 `600900.SH` / `SH600900` 等别名提高检索命中率。
 

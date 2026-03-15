@@ -180,7 +180,11 @@ def load_config() -> Config:
     if chain_of_search_depth <= 0:
         raise ValueError("环境变量 CHAIN_OF_SEARCH_DEPTH 必须大于 0")
 
-    search_reflection_max_rounds = safe_int(os.getenv("SEARCH_REFLECTION_MAX_ROUNDS", "3"), default=3)
+    search_reflection_rounds_raw = (
+        os.getenv("INFORMATION_ASSESSMENT_ROUNDS", "").strip()
+        or os.getenv("SEARCH_REFLECTION_MAX_ROUNDS", "3").strip()
+    )
+    search_reflection_max_rounds = safe_int(search_reflection_rounds_raw, default=3)
     if search_reflection_max_rounds <= 0:
         raise ValueError("环境变量 SEARCH_REFLECTION_MAX_ROUNDS 必须大于 0")
 
@@ -605,15 +609,16 @@ def refine_context_with_ai(config: Config, stock_code: str, contexts: list[dict]
             config.search_region,
         )
         if not extra_hits:
-            realtime_print(f"[进度] {stock_code}: 追加检索未获得新结果，停止迭代")
-            break
+            realtime_print(f"[进度] {stock_code}: 追加检索未获得新结果，继续下一轮评估")
+            continue
 
         before = len(refined_contexts)
         refined_contexts = merge_context_hits(refined_contexts, extra_hits)
         added = len(refined_contexts) - before
         realtime_print(f"[进度] {stock_code}: 追加检索新增 {added} 条上下文")
         if added <= 0:
-            break
+            realtime_print(f"[进度] {stock_code}: 本轮未新增有效上下文，继续下一轮评估")
+            continue
 
     return refined_contexts
 
