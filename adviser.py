@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 _TRADE_DATE_CACHE: dict[str, object] = {"date": None, "value": None}
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _LLM_RATE_LIMIT_STATE: dict[str, float] = {"last_request_at": 0.0}
-_MIN_SECONDS_BETWEEN_LLM_REQUESTS = 12.5
+_MIN_SECONDS_BETWEEN_LLM_REQUESTS = 30
 
 
 def now_shanghai() -> datetime:
