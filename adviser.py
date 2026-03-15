@@ -91,6 +91,7 @@ class Config:
     exchange_sender_upn: str | None = None
     market_data_provider: str = "auto"
     chain_of_search_depth: int = 1
+    search_reflection_max_rounds: int = 3
 
 
 @dataclass
@@ -178,6 +179,10 @@ def load_config() -> Config:
     if chain_of_search_depth <= 0:
         raise ValueError("环境变量 CHAIN_OF_SEARCH_DEPTH 必须大于 0")
 
+    search_reflection_max_rounds = safe_int(os.getenv("SEARCH_REFLECTION_MAX_ROUNDS", "3"), default=3)
+    if search_reflection_max_rounds <= 0:
+        raise ValueError("环境变量 SEARCH_REFLECTION_MAX_ROUNDS 必须大于 0")
+
     market_data_provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
     if market_data_provider not in {"auto", "akshare", "yahoo", "eastmoney", "sina", "tencent", "stooq"}:
         raise ValueError(
@@ -208,6 +213,7 @@ def load_config() -> Config:
         exchange_sender_upn=os.getenv("EXCHANGE_SENDER_UPN", "").strip() or sender_email,
         market_data_provider=market_data_provider,
         chain_of_search_depth=chain_of_search_depth,
+        search_reflection_max_rounds=search_reflection_max_rounds,
     )
 
 
@@ -475,6 +481,138 @@ def search_context_via_queries(stock_code: str, queries: list[str], max_results:
     return results
 
 
+def merge_context_hits(existing: list[dict], new_hits: list[dict]) -> list[dict]:
+    merged = list(existing)
+    seen_keys = {
+        (row.get("href", "").strip(), row.get("title", "").strip())
+        for row in existing
+    }
+    for hit in new_hits:
+        key = (hit.get("href", "").strip(), hit.get("title", "").strip())
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        merged.append(hit)
+    return merged
+
+
+def parse_json_object_from_text(text: str) -> dict:
+    cleaned = text.strip()
+    fenced_match = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", cleaned, flags=re.IGNORECASE)
+    if fenced_match:
+        cleaned = fenced_match.group(1)
+    else:
+        obj_match = re.search(r"(\{[\s\S]*\})", cleaned)
+        if obj_match:
+            cleaned = obj_match.group(1)
+    parsed = json.loads(cleaned)
+    if not isinstance(parsed, dict):
+        raise ValueError("模型返回不是 JSON 对象")
+    return parsed
+
+
+def assess_information_sufficiency(
+    config: Config,
+    stock_code: str,
+    contexts: list[dict],
+    model_name: str,
+) -> tuple[bool, list[str], str]:
+    import requests
+
+    url = f"{active_llm_base_url(config)}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {active_llm_api_key(config)}",
+        "Content-Type": "application/json",
+    }
+    latest_contexts = contexts[-20:]
+    context_lines = [
+        f"[{i}] date={item.get('published_at', 'unknown')} title={item.get('title', '')} summary={item.get('body', '')}"
+        for i, item in enumerate(latest_contexts, start=1)
+    ]
+    payload = {
+        "model": model_name,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是投研检索审计员。请评估当前信息是否足以支撑高质量的交易策略。"
+                    "若不足，给出下一轮可执行搜索词。必须只输出 JSON。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"股票代码：{stock_code}\n"
+                    "请返回 JSON："
+                    '{"sufficient": true/false, "reason": "...", "followup_queries": ["..."]}。'
+                    "若 sufficient=true，followup_queries 应为空数组。"
+                    "followup_queries 最多 3 条，必须具体且可直接用于新闻检索。\n\n"
+                    "当前信息：\n"
+                    + "\n".join(context_lines)
+                ),
+            },
+        ],
+    }
+
+    resp = request_with_retry(requests.post, url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    data = parse_json_object_from_text(content)
+    sufficient = bool(data.get("sufficient", False))
+    reason = str(data.get("reason", "")).strip()
+    followup = data.get("followup_queries", [])
+    if not isinstance(followup, list):
+        followup = []
+    clean_followup = list(dict.fromkeys(q.strip() for q in followup if isinstance(q, str) and q.strip()))[:3]
+    return sufficient, clean_followup, reason
+
+
+def refine_context_with_ai(config: Config, stock_code: str, contexts: list[dict], model_name: str) -> list[dict]:
+    refined_contexts = list(contexts)
+    for round_idx in range(1, config.search_reflection_max_rounds + 1):
+        try:
+            sufficient, followup_queries, reason = assess_information_sufficiency(
+                config,
+                stock_code,
+                refined_contexts,
+                model_name,
+            )
+        except Exception as exc:
+            realtime_print(f"[进度] {stock_code}: 信息充分性评估失败，跳过追加检索: {exc}")
+            break
+
+        realtime_print(
+            f"[进度] {stock_code}: 信息评估 第 {round_idx}/{config.search_reflection_max_rounds} 轮 -> "
+            f"sufficient={sufficient} reason={reason or 'N/A'}"
+        )
+        if sufficient:
+            break
+        if not followup_queries:
+            realtime_print(f"[进度] {stock_code}: 信息不足但未给出追加检索词，停止迭代")
+            break
+
+        realtime_print(f"[进度] {stock_code}: 触发追加检索，queries={followup_queries}")
+        extra_hits = search_context_via_queries(
+            stock_code,
+            followup_queries,
+            config.max_search_results,
+            config.search_region,
+        )
+        if not extra_hits:
+            realtime_print(f"[进度] {stock_code}: 追加检索未获得新结果，停止迭代")
+            break
+
+        before = len(refined_contexts)
+        refined_contexts = merge_context_hits(refined_contexts, extra_hits)
+        added = len(refined_contexts) - before
+        realtime_print(f"[进度] {stock_code}: 追加检索新增 {added} 条上下文")
+        if added <= 0:
+            break
+
+    return refined_contexts
+
+
 def extract_followup_topics(results: list[dict], stock_code: str) -> list[str]:
     hot_words: list[str] = []
     for row in results[:20]:
@@ -598,7 +736,7 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
     ).strip()
 
 
-def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> str:
+def request_ai_advice(config: Config, stock_code: str, contexts: List[dict], model_name: str) -> str:
     url = f"{active_llm_base_url(config)}/chat/completions"
     headers = {
         "Authorization": f"Bearer {active_llm_api_key(config)}",
@@ -608,7 +746,7 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
     import requests
 
     payload = {
-        "model": resolve_model(config, requests),
+        "model": model_name,
         "temperature": 0.2,
         "messages": [
             {
@@ -697,7 +835,11 @@ def run() -> None:
 
     configure_realtime_stdout()
     config = load_config()
+    import requests
+
+    runtime_model_name = resolve_model(config, requests)
     realtime_print(f"[进度] 已加载配置，共 {len(config.stock_codes)} 只股票待分析")
+    realtime_print(f"[进度] 当前 LLM: provider={active_llm_label(config)} model={runtime_model_name}")
 
     final_results: list[dict] = []
     research_cache: dict[str, StockResearchResult] = {}
@@ -722,11 +864,12 @@ def run() -> None:
                 "body": format_market_snapshot(market_snapshot),
                 "published_at": market_snapshot.get("date", "unknown"),
             })
+        contexts = refine_context_with_ai(config, code, contexts, runtime_model_name)
         realtime_print(f"[进度] {stock_label}: 开始请求 AI 生成建议")
-        advice = request_ai_advice(config, code, contexts)
+        advice = request_ai_advice(config, code, contexts, runtime_model_name)
         realtime_print(f"[进度] {stock_label}: AI 建议生成完成")
         realtime_print(advice)
-        brief_summary = build_brief_summary_with_ai(config, code, advice)
+        brief_summary = build_brief_summary_with_ai(config, code, advice, runtime_model_name)
         research_cache[code] = StockResearchResult(
             stock_code=code,
             stock_name=stock_name,
@@ -1023,14 +1166,14 @@ def fetch_cn_stock_name(stock_code: str) -> str | None:
 
 
 
-def build_brief_summary_with_ai(config: Config, stock_code: str, advice: str) -> str:
-    ai_summary = request_ai_brief_summary(config, stock_code, advice)
+def build_brief_summary_with_ai(config: Config, stock_code: str, advice: str, model_name: str) -> str:
+    ai_summary = request_ai_brief_summary(config, stock_code, advice, model_name)
     if ai_summary:
         return ai_summary
     return build_brief_summary(stock_code, advice)
 
 
-def request_ai_brief_summary(config: Config, stock_code: str, advice: str) -> str | None:
+def request_ai_brief_summary(config: Config, stock_code: str, advice: str, model_name: str) -> str | None:
     url = f"{active_llm_base_url(config)}/chat/completions"
     headers = {
         "Authorization": f"Bearer {active_llm_api_key(config)}",
@@ -1040,7 +1183,7 @@ def request_ai_brief_summary(config: Config, stock_code: str, advice: str) -> st
     import requests
 
     payload = {
-        "model": resolve_model(config, requests),
+        "model": model_name,
         "temperature": 0.1,
         "messages": [
             {

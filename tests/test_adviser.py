@@ -519,3 +519,24 @@ def test_load_config_raises_when_nim_key_missing(monkeypatch):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "NVIDIA_NIM_API_KEY" in str(exc)
+
+
+def test_load_config_reads_search_reflection_max_rounds(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("SEARCH_REFLECTION_MAX_ROUNDS", "4")
+
+    config = adviser.load_config()
+
+    assert config.search_reflection_max_rounds == 4
+
+
+def test_parse_json_object_from_text_supports_fenced_json():
+    raw = """```json
+{"sufficient": false, "reason": "数据不足", "followup_queries": ["AAPL 指引"]}
+```"""
+
+    data = adviser.parse_json_object_from_text(raw)
+
+    assert data["sufficient"] is False
+    assert data["reason"] == "数据不足"
