@@ -132,17 +132,21 @@ d@example.com:MSFT,NVDA"
 ### Actions 里需要配置的 Secrets / Variables
 
 - `Settings -> Secrets and variables -> Actions -> Secrets`
-  - `AIHUBMIX_API_KEY`
+  - 当 `LLM_PROVIDER=aihubmix`：`AIHUBMIX_API_KEY`
+  - 当 `LLM_PROVIDER=nim`：`NVIDIA_NIM_API_KEY`（或 `NIM_API_KEY`）
   - `SENDER_EMAIL`（如需发邮件）
   - `SENDER_AUTH_CODE`（如需发邮件）
 
 - `Settings -> Secrets and variables -> Actions -> Variables`
+  - `LLM_PROVIDER`（可选，默认 `aihubmix`，可设为 `nim`）
   - `STOCK_CODES`（或改用 `EMAIL_STOCK_ROUTER`）
   - `RUN_ADVICE_TIME`（可选，默认 `18:00`）
   - `RUN_ADVICE_TIMEZONE`（可选，默认 `Asia/Shanghai`）
   - `MARKET_DATA_PROVIDER`（可选：`auto`/`yahoo`/`eastmoney`/`akshare`）
   - （可选）`AIHUBMIX_BASE_URL`
   - （可选）`AIHUBMIX_MODEL`
+  - （可选）`NIM_BASE_URL`
+  - （可选）`NIM_MODEL`
   - （可选）`EMAIL_STOCK_ROUTER`
   - （可选）`DUCKDUCKGO_MAX_RESULTS`
   - （可选）`DUCKDUCKGO_REGION`
