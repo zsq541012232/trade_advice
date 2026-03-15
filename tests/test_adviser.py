@@ -48,8 +48,8 @@ def test_build_user_prompt_contains_short_and_long_term_requirements():
         }
     ]
     prompt = adviser.build_user_prompt("AAPL", contexts)
-    assert "决策仪表盘" in prompt
-    assert "分析结果摘要" in prompt
+    assert "不要输出组合总览" in prompt
+    assert "反复主动检索" in prompt or "主动检索" in prompt
     assert "作战计划" in prompt
     assert "报告生成时间" in prompt
     assert "AAPL" in prompt
@@ -257,6 +257,53 @@ def test_to_eastmoney_secid_accepts_prefixed_a_share_code():
     secid, symbol = adviser.to_eastmoney_secid("SH.600900")
     assert secid == "1.600900"
     assert symbol == "600900"
+
+
+def test_build_email_message_uses_portfolio_dashboard_format():
+    config = adviser.Config(
+        llm_provider="aihubmix",
+        aihubmix_api_key="k",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        stock_codes=["600036", "600900"],
+        max_search_results=5,
+        search_region="zh-cn",
+    )
+    research_by_stock = {
+        "600036": adviser.StockResearchResult(
+            stock_code="600036",
+            stock_name="招商银行",
+            contexts=[{"title": "x"}],
+            advice=(
+                "🟢 招商银行 (600036)\n"
+                "📌 核心结论\n"
+                "🟢 买入 | 强烈看多\n"
+                "一句话决策: 回踩支撑可分批布局。\n"
+            ),
+            brief_summary="买入，风控止损",
+        ),
+        "600900": adviser.StockResearchResult(
+            stock_code="600900",
+            stock_name="长江电力",
+            contexts=[{"title": "x"}],
+            advice=(
+                "🟢 长江电力 (600900)\n"
+                "📌 核心结论\n"
+                "🟢 持有/小仓买入 | 看多\n"
+                "一句话决策: 缩量回踩，逢低布局。\n"
+            ),
+            brief_summary="持有/小仓买入，注意回撤",
+        ),
+    }
+
+    message = adviser.build_email_message(config, "a@example.com", ["600036", "600900"], research_by_stock)
+
+    assert message is not None
+    body = adviser.extract_html_body(message)
+    assert "决策仪表盘" in body
+    assert "分析结果摘要" in body
+    assert "招商银行(600036): 强烈看多" in body or "招商银行(600036): 买入" in body
+    assert "长江电力(600900): 看多" in body or "长江电力(600900): 持有/小仓买入" in body
 
 
 def test_normalize_query_key_dedup_semantic_aliases():
@@ -514,9 +561,9 @@ def test_build_email_message_lists_summary_before_details():
     message = adviser.build_email_message(config, "a@test.com", ["AAPL"], {"AAPL": research})
 
     html_body = adviser.extract_html_body(message)
-    assert "快速摘要" in html_body
-    assert "AAPL（苹果）" in html_body
-    assert html_body.index("观点=中性；置信度=70/100") < html_body.index("详细分析正文")
+    assert "决策仪表盘" in html_body
+    assert "苹果(AAPL):" in html_body
+    assert html_body.index("分析结果摘要") < html_body.index("详细分析正文")
 
 
 def test_build_queries_contains_global_macro_topics():
