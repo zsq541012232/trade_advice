@@ -29,6 +29,8 @@ from zoneinfo import ZoneInfo
 
 _TRADE_DATE_CACHE: dict[str, object] = {"date": None, "value": None}
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_LLM_RATE_LIMIT_STATE: dict[str, float] = {"last_request_at": 0.0}
+_MIN_SECONDS_BETWEEN_LLM_REQUESTS = 12.5
 
 
 def now_shanghai() -> datetime:
@@ -47,6 +49,20 @@ def request_with_retry(request_callable, *args, retries: int = 3, backoff_second
             time.sleep(backoff_seconds * (2 ** (attempt - 1)))
         except requests.RequestException:
             raise
+
+
+def wait_for_llm_rate_limit(stock_code: str, stage: str) -> None:
+    now = time.monotonic()
+    last_request_at = _LLM_RATE_LIMIT_STATE["last_request_at"]
+    elapsed = now - last_request_at
+    wait_seconds = _MIN_SECONDS_BETWEEN_LLM_REQUESTS - elapsed
+    if wait_seconds > 0:
+        realtime_print(
+            f"[进度] {stock_code}: {stage} 前限流等待 {wait_seconds:.1f}s，"
+            "以满足模型调用频率约束（<=5 次/分钟）"
+        )
+        time.sleep(wait_seconds)
+    _LLM_RATE_LIMIT_STATE["last_request_at"] = time.monotonic()
 
 
 
@@ -564,6 +580,7 @@ def assess_information_sufficiency(
         ],
     }
 
+    wait_for_llm_rate_limit(stock_code, "信息充分性评估")
     resp = request_with_retry(requests.post, url, headers=headers, json=payload, timeout=60)
     resp.raise_for_status()
     content = resp.json()["choices"][0]["message"]["content"]
@@ -839,6 +856,7 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict], mod
         ],
     }
 
+    wait_for_llm_rate_limit(stock_code, "策略生成")
     resp = request_with_retry(requests.post, url, headers=headers, json=payload, timeout=120)
     try:
         resp.raise_for_status()
@@ -1371,6 +1389,7 @@ def request_ai_brief_summary(config: Config, stock_code: str, advice: str, model
     }
 
     try:
+        wait_for_llm_rate_limit(stock_code, "摘要生成")
         resp = request_with_retry(requests.post, url, headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()

@@ -700,3 +700,40 @@ def test_parse_json_object_from_text_supports_fenced_json():
 
     assert data["sufficient"] is False
     assert data["reason"] == "数据不足"
+
+
+def test_wait_for_llm_rate_limit_sleeps_when_called_too_fast(monkeypatch):
+    sleep_calls = []
+    clock = {"value": 100.0}
+
+    def fake_monotonic():
+        return clock["value"]
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        clock["value"] += seconds
+
+    monkeypatch.setattr(adviser.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(adviser.time, "sleep", fake_sleep)
+    monkeypatch.setattr(adviser, "realtime_print", lambda *args, **kwargs: None)
+    adviser._LLM_RATE_LIMIT_STATE["last_request_at"] = 95.0
+
+    adviser.wait_for_llm_rate_limit("AAPL", "策略生成")
+
+    assert len(sleep_calls) == 1
+    assert round(sleep_calls[0], 1) == 7.5
+    assert adviser._LLM_RATE_LIMIT_STATE["last_request_at"] == clock["value"]
+
+
+def test_wait_for_llm_rate_limit_does_not_sleep_when_interval_is_enough(monkeypatch):
+    sleep_calls = []
+
+    monkeypatch.setattr(adviser.time, "monotonic", lambda: 200.0)
+    monkeypatch.setattr(adviser.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(adviser, "realtime_print", lambda *args, **kwargs: None)
+    adviser._LLM_RATE_LIMIT_STATE["last_request_at"] = 180.0
+
+    adviser.wait_for_llm_rate_limit("AAPL", "信息充分性评估")
+
+    assert sleep_calls == []
+    assert adviser._LLM_RATE_LIMIT_STATE["last_request_at"] == 200.0
