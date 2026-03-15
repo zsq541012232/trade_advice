@@ -94,6 +94,12 @@ class Config:
     nim_api_key: str = ""
     nim_base_url: str = "https://integrate.api.nvidia.com/v1"
     nim_model: str = "deepseek-ai/deepseek-r1"
+    lmstudio_api_key: str = ""
+    lmstudio_base_url: str = "http://127.0.0.1:1234/v1"
+    lmstudio_model: str = "local-model"
+    huggingface_api_key: str = ""
+    huggingface_base_url: str = "https://router.huggingface.co/v1"
+    huggingface_model: str = "Qwen/Qwen2.5-72B-Instruct"
     email_stock_router: dict[str, List[str]] = field(default_factory=dict)
     sender_email: str | None = None
     sender_auth_code: str | None = None
@@ -121,8 +127,8 @@ class StockResearchResult:
 
 def load_config() -> Config:
     llm_provider = (os.getenv("LLM_PROVIDER", "aihubmix").strip().lower() or "aihubmix")
-    if llm_provider not in {"aihubmix", "nim"}:
-        raise ValueError("环境变量 LLM_PROVIDER 仅支持 aihubmix / nim")
+    if llm_provider not in {"aihubmix", "nim", "lmstudio", "huggingface"}:
+        raise ValueError("环境变量 LLM_PROVIDER 仅支持 aihubmix / nim / lmstudio / huggingface")
 
     api_key = os.getenv("AIHUBMIX_API_KEY", "").strip()
     base_url = normalize_base_url(
@@ -143,10 +149,34 @@ def load_config() -> Config:
         or "deepseek-ai/deepseek-r1"
     )
 
+    lmstudio_api_key = os.getenv("LMSTUDIO_API_KEY", "").strip()
+    lmstudio_base_url = normalize_base_url(
+        os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
+        var_name="LMSTUDIO_BASE_URL",
+        fallback_url="http://127.0.0.1:1234/v1",
+    )
+    lmstudio_model = os.getenv("LMSTUDIO_MODEL", "local-model").strip() or "local-model"
+
+    huggingface_api_key = (
+        os.getenv("HUGGINGFACE_API_KEY", "").strip() or os.getenv("HF_API_KEY", "").strip()
+    )
+    huggingface_base_url = normalize_base_url(
+        os.getenv("HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1"),
+        var_name="HUGGINGFACE_BASE_URL",
+        fallback_url="https://router.huggingface.co/v1",
+    )
+    huggingface_model = (
+        os.getenv("HUGGINGFACE_MODEL", "").strip()
+        or os.getenv("HF_MODEL", "").strip()
+        or "Qwen/Qwen2.5-72B-Instruct"
+    )
+
     if llm_provider == "aihubmix" and not api_key:
         raise ValueError("缺少环境变量 AIHUBMIX_API_KEY")
     if llm_provider == "nim" and not nim_api_key:
         raise ValueError("缺少环境变量 NVIDIA_NIM_API_KEY（或 NIM_API_KEY）")
+    if llm_provider == "huggingface" and not huggingface_api_key:
+        raise ValueError("缺少环境变量 HUGGINGFACE_API_KEY（或 HF_API_KEY）")
 
     router = parse_email_stock_router(os.getenv("EMAIL_STOCK_ROUTER", ""))
 
@@ -218,6 +248,12 @@ def load_config() -> Config:
         nim_api_key=nim_api_key,
         nim_base_url=nim_base_url.rstrip("/"),
         nim_model=nim_model,
+        lmstudio_api_key=lmstudio_api_key,
+        lmstudio_base_url=lmstudio_base_url.rstrip("/"),
+        lmstudio_model=lmstudio_model,
+        huggingface_api_key=huggingface_api_key,
+        huggingface_base_url=huggingface_base_url.rstrip("/"),
+        huggingface_model=huggingface_model,
         stock_codes=stock_codes,
         max_search_results=max_search_results,
         search_region=search_region,
@@ -311,25 +347,49 @@ def normalize_base_url(
 def active_llm_api_key(config: Config) -> str:
     if config.llm_provider == "nim":
         return config.nim_api_key
+    if config.llm_provider == "lmstudio":
+        return config.lmstudio_api_key
+    if config.llm_provider == "huggingface":
+        return config.huggingface_api_key
     return config.aihubmix_api_key
 
 
 def active_llm_base_url(config: Config) -> str:
     if config.llm_provider == "nim":
         return config.nim_base_url
+    if config.llm_provider == "lmstudio":
+        return config.lmstudio_base_url
+    if config.llm_provider == "huggingface":
+        return config.huggingface_base_url
     return config.aihubmix_base_url
 
 
 def active_llm_model(config: Config) -> str:
     if config.llm_provider == "nim":
         return config.nim_model
+    if config.llm_provider == "lmstudio":
+        return config.lmstudio_model
+    if config.llm_provider == "huggingface":
+        return config.huggingface_model
     return config.aihubmix_model
 
 
 def active_llm_label(config: Config) -> str:
     if config.llm_provider == "nim":
         return "NVIDIA NIM"
+    if config.llm_provider == "lmstudio":
+        return "LM Studio"
+    if config.llm_provider == "huggingface":
+        return "Hugging Face"
     return "AIHUBMIX"
+
+
+def build_llm_headers(config: Config) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    api_key = active_llm_api_key(config)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 def build_queries(stock_code: str, adaptive_topics: list[str] | None = None) -> List[str]:
@@ -545,10 +605,7 @@ def assess_information_sufficiency(
     import requests
 
     url = f"{active_llm_base_url(config)}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {active_llm_api_key(config)}",
-        "Content-Type": "application/json",
-    }
+    headers = build_llm_headers(config)
     latest_contexts = contexts[-20:]
     context_lines = [
         f"[{i}] date={item.get('published_at', 'unknown')} title={item.get('title', '')} summary={item.get('body', '')}"
@@ -825,10 +882,7 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
 
 def request_ai_advice(config: Config, stock_code: str, contexts: List[dict], model_name: str) -> str:
     url = f"{active_llm_base_url(config)}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {active_llm_api_key(config)}",
-        "Content-Type": "application/json",
-    }
+    headers = build_llm_headers(config)
 
     import requests
 
@@ -877,7 +931,7 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict], mod
 def resolve_model(config: Config, requests_module) -> str:
     """优先使用用户配置模型，不可用时给出清晰报错与可选模型。"""
     url = f"{active_llm_base_url(config)}/models"
-    headers = {"Authorization": f"Bearer {active_llm_api_key(config)}"}
+    headers = build_llm_headers(config)
 
     try:
         resp = request_with_retry(requests_module.get, url, headers=headers, timeout=30)
@@ -906,6 +960,18 @@ def resolve_model(config: Config, requests_module) -> str:
             "nvidia/llama-3.1-nemotron-70b-instruct",
             "mistralai/mixtral-8x7b-instruct-v0.1",
         ]
+    elif config.llm_provider == "huggingface":
+        preferred_candidates = [
+            "Qwen/Qwen2.5-72B-Instruct",
+            "meta-llama/Llama-3.1-70B-Instruct",
+            "deepseek-ai/DeepSeek-R1",
+            "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        ]
+    elif config.llm_provider == "lmstudio":
+        preferred_candidates = [
+            config.lmstudio_model,
+            "local-model",
+        ]
     else:
         preferred_candidates = [
             "gpt-4o",
@@ -923,7 +989,7 @@ def resolve_model(config: Config, requests_module) -> str:
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="股票投资建议生成器（AIHUBMIX/NVIDIA NIM + DuckDuckGo）")
+    parser = argparse.ArgumentParser(description="股票投资建议生成器（AIHUBMIX/NVIDIA NIM/LM Studio/Hugging Face + DuckDuckGo）")
     parser.add_argument(
         "--pretty-json",
         action="store_true",
@@ -1387,10 +1453,7 @@ def build_brief_summary_with_ai(config: Config, stock_code: str, advice: str, mo
 
 def request_ai_brief_summary(config: Config, stock_code: str, advice: str, model_name: str) -> str | None:
     url = f"{active_llm_base_url(config)}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {active_llm_api_key(config)}",
-        "Content-Type": "application/json",
-    }
+    headers = build_llm_headers(config)
 
     import requests
 
