@@ -632,6 +632,53 @@ def test_load_config_reads_search_reflection_max_rounds(monkeypatch):
     assert config.search_reflection_max_rounds == 4
 
 
+def test_load_config_reads_information_assessment_rounds(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("INFORMATION_ASSESSMENT_ROUNDS", "5")
+
+    config = adviser.load_config()
+
+    assert config.search_reflection_max_rounds == 5
+
+
+def test_load_config_information_assessment_rounds_overrides_legacy_env(monkeypatch):
+    monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("INFORMATION_ASSESSMENT_ROUNDS", "6")
+    monkeypatch.setenv("SEARCH_REFLECTION_MAX_ROUNDS", "2")
+
+    config = adviser.load_config()
+
+    assert config.search_reflection_max_rounds == 6
+
+
+def test_refine_context_with_ai_continues_when_followup_search_has_no_results(monkeypatch):
+    config = adviser.Config(
+        llm_provider="aihubmix",
+        aihubmix_api_key="k",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="zh-cn",
+        search_reflection_max_rounds=2,
+    )
+    assess_calls = {"count": 0}
+
+    def fake_assess(*args, **kwargs):
+        assess_calls["count"] += 1
+        return False, ["AAPL guidance"], "still insufficient"
+
+    monkeypatch.setattr(adviser, "assess_information_sufficiency", fake_assess)
+    monkeypatch.setattr(adviser, "search_context_via_queries", lambda *args, **kwargs: [])
+
+    refined = adviser.refine_context_with_ai(config, "AAPL", [{"title": "seed"}], "gpt-4o-mini")
+
+    assert assess_calls["count"] == 2
+    assert refined == [{"title": "seed"}]
+
+
 def test_parse_json_object_from_text_supports_fenced_json():
     raw = """```json
 {"sufficient": false, "reason": "数据不足", "followup_queries": ["AAPL 指引"]}
