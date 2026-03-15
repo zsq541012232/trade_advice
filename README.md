@@ -1,6 +1,6 @@
 # trade_advice
 
-基于 **AIHUBMIX / NVIDIA NIM + DuckDuckGo + 行情源** 的股票投资建议脚本。会先抓取新闻/舆情/财报/技术指标相关信息，再由大模型输出：
+基于 **AIHUBMIX / NVIDIA NIM / LM Studio / Hugging Face + DuckDuckGo + 行情源** 的股票投资建议脚本。会先抓取新闻/舆情/财报/技术指标相关信息，再由大模型输出：
 
 - 短线建议（1天~2周）
 - 长线建议（3个月~3年）
@@ -27,9 +27,11 @@ cp .env.example .env
 
 至少需要：
 
-- `LLM_PROVIDER`（`aihubmix` 或 `nim`）
+- `LLM_PROVIDER`（`aihubmix` / `nim` / `lmstudio` / `huggingface`）
 - 当 `LLM_PROVIDER=aihubmix`：`AIHUBMIX_API_KEY`
 - 当 `LLM_PROVIDER=nim`：`NVIDIA_NIM_API_KEY`（或兼容变量 `NIM_API_KEY`）
+- 当 `LLM_PROVIDER=lmstudio`：通常不需要 API Key（可选 `LMSTUDIO_API_KEY`）
+- 当 `LLM_PROVIDER=huggingface`：`HUGGINGFACE_API_KEY`（或 `HF_API_KEY`）
 - `STOCK_CODES`（例如 `AAPL,TSLA,600519.SS`）或 `EMAIL_STOCK_ROUTER`
 
 常用可选项：
@@ -38,6 +40,10 @@ cp .env.example .env
 - `AIHUBMIX_MODEL`（默认 `gpt-4o-mini`）
 - `NVIDIA_NIM_BASE_URL`（默认 `https://integrate.api.nvidia.com/v1`）
 - `NIM_MODEL`（默认 `deepseek-ai/deepseek-r1`）
+- `LMSTUDIO_BASE_URL`（默认 `http://127.0.0.1:1234/v1`）
+- `LMSTUDIO_MODEL`（默认 `local-model`，建议设置为你本地已加载模型名）
+- `HUGGINGFACE_BASE_URL`（默认 `https://router.huggingface.co/v1`）
+- `HUGGINGFACE_MODEL`（默认 `Qwen/Qwen2.5-72B-Instruct`）
 - `DUCKDUCKGO_MAX_RESULTS`（默认 `5`）
 - `DUCKDUCKGO_REGION`（默认 `zh-cn`）
 - `MARKET_DATA_PROVIDER`（默认 `auto`，可选 `yahoo` / `eastmoney` / `akshare`）
@@ -139,7 +145,7 @@ d@example.com:MSFT,NVDA"
   - `SENDER_AUTH_CODE`（如需发邮件）
 
 - `Settings -> Secrets and variables -> Actions -> Variables`
-  - `LLM_PROVIDER`（可选，默认 `aihubmix`，可设为 `nim`）
+  - `LLM_PROVIDER`（可选，默认 `aihubmix`，可设为 `nim` / `lmstudio` / `huggingface`）
   - `STOCK_CODES`（或改用 `EMAIL_STOCK_ROUTER`）
   - `RUN_ADVICE_TIME`（可选，默认 `18:00`）
   - `RUN_ADVICE_TIMEZONE`（可选，默认 `Asia/Shanghai`）

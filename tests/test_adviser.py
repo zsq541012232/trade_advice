@@ -84,6 +84,43 @@ def test_load_config_accepts_extended_market_data_provider(monkeypatch):
     assert config.market_data_provider == "tencent"
 
 
+def test_load_config_supports_lmstudio_provider_without_api_key(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "lmstudio")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "127.0.0.1:1234/v1")
+    monkeypatch.setenv("LMSTUDIO_MODEL", "qwen2.5")
+
+    config = adviser.load_config()
+
+    assert config.llm_provider == "lmstudio"
+    assert config.lmstudio_base_url == "https://127.0.0.1:1234/v1"
+    assert config.lmstudio_model == "qwen2.5"
+
+
+def test_load_config_supports_huggingface_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "huggingface")
+    monkeypatch.setenv("HUGGINGFACE_API_KEY", "hf_xxx")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+    monkeypatch.setenv("HUGGINGFACE_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+
+    config = adviser.load_config()
+
+    assert config.llm_provider == "huggingface"
+    assert config.huggingface_api_key == "hf_xxx"
+    assert config.huggingface_model == "meta-llama/Llama-3.1-8B-Instruct"
+
+
+def test_load_config_huggingface_requires_api_key(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "huggingface")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+
+    try:
+        adviser.load_config()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "HUGGINGFACE_API_KEY" in str(exc)
+
+
 def test_load_config_uses_default_when_max_results_is_empty(monkeypatch):
     monkeypatch.setenv("AIHUBMIX_API_KEY", "test-key")
     monkeypatch.setenv("STOCK_CODES", "AAPL")
@@ -234,6 +271,28 @@ def test_resolve_model_for_nim_falls_back_to_first_available_when_no_nim_candida
     model = adviser.resolve_model(config, req)
 
     assert model == "gpt-4o"
+
+
+def test_resolve_model_for_huggingface_prefers_hf_candidates():
+    config = adviser.Config(
+        llm_provider="huggingface",
+        aihubmix_api_key="",
+        aihubmix_base_url="https://api.aihubmix.com/v1",
+        aihubmix_model="gpt-4o-mini",
+        huggingface_api_key="hf_xxx",
+        huggingface_base_url="https://router.huggingface.co/v1",
+        huggingface_model="unknown-model",
+        stock_codes=["AAPL"],
+        max_search_results=5,
+        search_region="zh-cn",
+    )
+    req = _FakeRequests(_FakeResponse({"data": [{"id": "meta-llama/Llama-3.1-70B-Instruct"}, {"id": "foo/bar"}]}))
+
+    model = adviser.resolve_model(config, req)
+
+    assert model == "meta-llama/Llama-3.1-70B-Instruct"
+
+
 def test_stock_code_aliases_for_shanghai_code():
     aliases = adviser.stock_code_aliases("600900")
     assert aliases == ["600900", "600900.SH", "上证600900"]
