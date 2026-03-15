@@ -48,10 +48,10 @@ def test_build_user_prompt_contains_short_and_long_term_requirements():
         }
     ]
     prompt = adviser.build_user_prompt("AAPL", contexts)
-    assert "短线策略（1天~2周）" in prompt
-    assert "长线策略（3个月~3年）" in prompt
-    assert "情景分析" in prompt
-    assert "研究置信度" in prompt
+    assert "决策仪表盘" in prompt
+    assert "分析结果摘要" in prompt
+    assert "作战计划" in prompt
+    assert "报告生成时间" in prompt
     assert "AAPL" in prompt
     assert "https://example.com/news" in prompt
 
