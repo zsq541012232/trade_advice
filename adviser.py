@@ -962,7 +962,7 @@ def resolve_model(config: Config, requests_module) -> str:
         ]
     elif config.llm_provider == "huggingface":
         preferred_candidates = [
-            "Qwen/Qwen2.5-72B-Instruct",
+            "zai-org/GLM-4.5:novita",
             "meta-llama/Llama-3.1-70B-Instruct",
             "deepseek-ai/DeepSeek-R1",
             "mistralai/Mixtral-8x7B-Instruct-v0.1",
