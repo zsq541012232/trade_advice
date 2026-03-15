@@ -142,6 +142,7 @@ def test_load_config_raises_when_base_url_is_invalid(monkeypatch):
 
 def test_resolve_model_keeps_configured_model_when_available():
     config = adviser.Config(
+        llm_provider="aihubmix",
         aihubmix_api_key="k",
         aihubmix_base_url="https://api.aihubmix.com/v1",
         aihubmix_model="gpt-4o-mini",
@@ -158,6 +159,7 @@ def test_resolve_model_keeps_configured_model_when_available():
 
 def test_resolve_model_falls_back_to_preferred_candidate_when_missing():
     config = adviser.Config(
+        llm_provider="aihubmix",
         aihubmix_api_key="k",
         aihubmix_base_url="https://api.aihubmix.com/v1",
         aihubmix_model="gpt-4o-mini",
@@ -432,6 +434,7 @@ def test_build_brief_summary_extracts_key_fields():
 
 def test_build_email_message_lists_summary_before_details():
     config = adviser.Config(
+        llm_provider="aihubmix",
         aihubmix_api_key="k",
         aihubmix_base_url="https://api.aihubmix.com/v1",
         aihubmix_model="gpt-4o-mini",
@@ -490,3 +493,29 @@ def test_now_shanghai_returns_shanghai_timezone():
     now = adviser.now_shanghai()
     assert now.tzinfo is not None
     assert now.utcoffset().total_seconds() == 8 * 3600
+
+
+def test_load_config_supports_nim_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "nim")
+    monkeypatch.setenv("NVIDIA_NIM_API_KEY", "nim-key")
+    monkeypatch.setenv("NVIDIA_NIM_MODEL", "meta/llama-3.1-8b-instruct")
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+
+    config = adviser.load_config()
+
+    assert config.llm_provider == "nim"
+    assert config.nim_api_key == "nim-key"
+    assert config.nim_model == "meta/llama-3.1-8b-instruct"
+
+
+def test_load_config_raises_when_nim_key_missing(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "nim")
+    monkeypatch.delenv("NVIDIA_NIM_API_KEY", raising=False)
+    monkeypatch.delenv("NIM_API_KEY", raising=False)
+    monkeypatch.setenv("STOCK_CODES", "AAPL")
+
+    try:
+        adviser.load_config()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "NVIDIA_NIM_API_KEY" in str(exc)

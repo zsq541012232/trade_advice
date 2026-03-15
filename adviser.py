@@ -68,12 +68,16 @@ def realtime_print(*args, **kwargs) -> None:
 
 @dataclass
 class Config:
+    llm_provider: str
     aihubmix_api_key: str
     aihubmix_base_url: str
     aihubmix_model: str
     stock_codes: List[str]
     max_search_results: int
     search_region: str
+    nim_api_key: str = ""
+    nim_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nim_model: str = "meta/llama-3.1-70b-instruct"
     email_stock_router: dict[str, List[str]] = field(default_factory=dict)
     sender_email: str | None = None
     sender_auth_code: str | None = None
@@ -99,12 +103,32 @@ class StockResearchResult:
 
 
 def load_config() -> Config:
-    api_key = os.getenv("AIHUBMIX_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("缺少环境变量 AIHUBMIX_API_KEY")
+    llm_provider = (os.getenv("LLM_PROVIDER", "aihubmix").strip().lower() or "aihubmix")
+    if llm_provider not in {"aihubmix", "nim"}:
+        raise ValueError("环境变量 LLM_PROVIDER 仅支持 aihubmix / nim")
 
-    base_url = normalize_base_url(os.getenv("AIHUBMIX_BASE_URL", "https://api.aihubmix.com/v1"))
+    api_key = os.getenv("AIHUBMIX_API_KEY", "").strip()
+    base_url = normalize_base_url(
+        os.getenv("AIHUBMIX_BASE_URL", "https://api.aihubmix.com/v1"),
+        var_name="AIHUBMIX_BASE_URL",
+    )
     model = os.getenv("AIHUBMIX_MODEL", "gpt-4o-mini").strip()
+
+    nim_api_key = (os.getenv("NVIDIA_NIM_API_KEY", "").strip() or os.getenv("NIM_API_KEY", "").strip())
+    nim_base_url = normalize_base_url(
+        os.getenv("NVIDIA_NIM_BASE_URL", os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")),
+        var_name="NVIDIA_NIM_BASE_URL",
+    )
+    nim_model = (
+        os.getenv("NVIDIA_NIM_MODEL", "").strip()
+        or os.getenv("NIM_MODEL", "").strip()
+        or "meta/llama-3.1-70b-instruct"
+    )
+
+    if llm_provider == "aihubmix" and not api_key:
+        raise ValueError("缺少环境变量 AIHUBMIX_API_KEY")
+    if llm_provider == "nim" and not nim_api_key:
+        raise ValueError("缺少环境变量 NVIDIA_NIM_API_KEY（或 NIM_API_KEY）")
 
     router = parse_email_stock_router(os.getenv("EMAIL_STOCK_ROUTER", ""))
 
@@ -161,9 +185,13 @@ def load_config() -> Config:
         )
 
     return Config(
+        llm_provider=llm_provider,
         aihubmix_api_key=api_key,
         aihubmix_base_url=base_url.rstrip("/"),
         aihubmix_model=model,
+        nim_api_key=nim_api_key,
+        nim_base_url=nim_base_url.rstrip("/"),
+        nim_model=nim_model,
         stock_codes=stock_codes,
         max_search_results=max_search_results,
         search_region=search_region,
@@ -228,7 +256,7 @@ def infer_smtp_host(sender_email: str | None) -> str:
     return mapping.get(domain, f"smtp.{domain}")
 
 
-def normalize_base_url(raw_base_url: str) -> str:
+def normalize_base_url(raw_base_url: str, var_name: str = "AIHUBMIX_BASE_URL") -> str:
     base_url = raw_base_url.strip()
     if not base_url:
         return "https://api.aihubmix.com/v1"
@@ -245,8 +273,32 @@ def normalize_base_url(raw_base_url: str) -> str:
             return with_scheme.rstrip("/")
 
     raise ValueError(
-        "环境变量 AIHUBMIX_BASE_URL 无效，请提供完整 URL（例如 https://api.aihubmix.com/v1）"
+        f"环境变量 {var_name} 无效，请提供完整 URL（例如 https://api.aihubmix.com/v1）"
     )
+
+
+def active_llm_api_key(config: Config) -> str:
+    if config.llm_provider == "nim":
+        return config.nim_api_key
+    return config.aihubmix_api_key
+
+
+def active_llm_base_url(config: Config) -> str:
+    if config.llm_provider == "nim":
+        return config.nim_base_url
+    return config.aihubmix_base_url
+
+
+def active_llm_model(config: Config) -> str:
+    if config.llm_provider == "nim":
+        return config.nim_model
+    return config.aihubmix_model
+
+
+def active_llm_label(config: Config) -> str:
+    if config.llm_provider == "nim":
+        return "NVIDIA NIM"
+    return "AIHUBMIX"
 
 
 def build_queries(stock_code: str, adaptive_topics: list[str] | None = None) -> List[str]:
@@ -547,9 +599,9 @@ def build_user_prompt(stock_code: str, contexts: List[dict]) -> str:
 
 
 def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> str:
-    url = f"{config.aihubmix_base_url}/chat/completions"
+    url = f"{active_llm_base_url(config)}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {config.aihubmix_api_key}",
+        "Authorization": f"Bearer {active_llm_api_key(config)}",
         "Content-Type": "application/json",
     }
 
@@ -584,8 +636,8 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
         except ValueError:
             detail = resp.text.strip()
         raise RuntimeError(
-            f"AIHUBMIX 请求失败（HTTP {resp.status_code}）。"
-            f"请检查 AIHUBMIX_MODEL 是否可用，当前值：{payload['model']}。"
+            f"{active_llm_label(config)} 请求失败（HTTP {resp.status_code}）。"
+            f"请检查当前模型是否可用，当前值：{payload['model']}。"
             f"响应：{detail}"
         ) from exc
     data = resp.json()
@@ -593,13 +645,13 @@ def request_ai_advice(config: Config, stock_code: str, contexts: List[dict]) -> 
     try:
         return data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"AIHUBMIX 返回格式异常: {json.dumps(data, ensure_ascii=False)}") from exc
+        raise RuntimeError(f"{active_llm_label(config)} 返回格式异常: {json.dumps(data, ensure_ascii=False)}") from exc
 
 
 def resolve_model(config: Config, requests_module) -> str:
     """优先使用用户配置模型，不可用时给出清晰报错与可选模型。"""
-    url = f"{config.aihubmix_base_url}/models"
-    headers = {"Authorization": f"Bearer {config.aihubmix_api_key}"}
+    url = f"{active_llm_base_url(config)}/models"
+    headers = {"Authorization": f"Bearer {active_llm_api_key(config)}"}
 
     try:
         resp = request_with_retry(requests_module.get, url, headers=headers, timeout=30)
@@ -607,7 +659,7 @@ def resolve_model(config: Config, requests_module) -> str:
         data = resp.json()
     except Exception:
         # /models 不可用时，不阻断主流程，回退到用户指定模型。
-        return config.aihubmix_model
+        return active_llm_model(config)
 
     model_ids = {
         item.get("id", "")
@@ -615,8 +667,9 @@ def resolve_model(config: Config, requests_module) -> str:
         if isinstance(item, dict) and item.get("id")
     }
 
-    if not model_ids or config.aihubmix_model in model_ids:
-        return config.aihubmix_model
+    configured_model = active_llm_model(config)
+    if not model_ids or configured_model in model_ids:
+        return configured_model
 
     preferred_candidates = [
         "gpt-4o",
@@ -634,7 +687,7 @@ def resolve_model(config: Config, requests_module) -> str:
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="股票投资建议生成器（AIHUBMIX + DuckDuckGo）")
+    parser = argparse.ArgumentParser(description="股票投资建议生成器（AIHUBMIX/NVIDIA NIM + DuckDuckGo）")
     parser.add_argument(
         "--pretty-json",
         action="store_true",
@@ -978,9 +1031,9 @@ def build_brief_summary_with_ai(config: Config, stock_code: str, advice: str) ->
 
 
 def request_ai_brief_summary(config: Config, stock_code: str, advice: str) -> str | None:
-    url = f"{config.aihubmix_base_url}/chat/completions"
+    url = f"{active_llm_base_url(config)}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {config.aihubmix_api_key}",
+        "Authorization": f"Bearer {active_llm_api_key(config)}",
         "Content-Type": "application/json",
     }
 
